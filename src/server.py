@@ -48,8 +48,19 @@ def get_client() -> OLCAClient:
     global _client
     if _client is None:
         port = int(os.getenv("OPENLCA_PORT", "8080"))
+        host = os.getenv("OPENLCA_HOST", "localhost")
         _client = OLCAClient(port=port)
-        logger.info(f"Connected to openLCA on port {port}")
+        # OLCAClient only accepts port; patch underlying ipc.Client for non-localhost hosts
+        # (needed when MCP server runs in Docker and openLCA is on the host machine)
+        if host not in ("localhost", "127.0.0.1"):
+            import olca_ipc as ipc
+            url = f"http://{host}:{port}"
+            try:
+                _client.client = ipc.Client(url=url)
+            except TypeError:
+                _client.client = ipc.Client(port)
+            logger.info(f"OpenLCA IPC client redirected → {url}")
+        logger.info(f"Connected to openLCA at {host}:{port}")
     return _client
 
 
@@ -952,10 +963,56 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
     return await handler(arguments)
 
 
+async def _run_sse_server() -> None:
+    """Run MCP server with HTTP/SSE transport for network and Docker deployments."""
+    try:
+        from mcp.server.sse import SseServerTransport
+        from starlette.applications import Starlette
+        from starlette.responses import JSONResponse
+        from starlette.routing import Mount, Route
+        import uvicorn
+    except ImportError as exc:
+        logger.error(
+            "SSE transport requires additional packages: pip install 'openlca-mcp-server[http]'"
+        )
+        raise SystemExit(1) from exc
+
+    sse = SseServerTransport("/messages/")
+
+    async def handle_sse(request):
+        async with sse.connect_sse(
+            request.scope, request.receive, request._send
+        ) as streams:
+            await server.run(streams[0], streams[1], server.create_initialization_options())
+
+    async def health(request):
+        return JSONResponse({"status": "ok", "server": "openlca-mcp", "version": "0.1.0"})
+
+    app = Starlette(
+        routes=[
+            Route("/health", endpoint=health),
+            Route("/sse", endpoint=handle_sse),
+            Mount("/messages/", app=sse.handle_post_message),
+        ]
+    )
+
+    host = os.getenv("MCP_HOST", "0.0.0.0")
+    port = int(os.getenv("MCP_PORT", "8000"))
+    logger.info(f"MCP SSE server → http://{host}:{port}/sse")
+    config = uvicorn.Config(
+        app, host=host, port=port,
+        log_level=os.getenv("LOG_LEVEL", "info").lower(),
+    )
+    await uvicorn.Server(config).serve()
+
+
 async def main():
     """Run the MCP server."""
-    logger.info("Starting OpenLCA MCP Server...")
-    logger.info(f"OpenLCA port: {os.getenv('OPENLCA_PORT', '8080')}")
+    transport = os.getenv("TRANSPORT", "stdio").lower()
+    logger.info(f"Starting OpenLCA MCP Server (transport={transport})...")
+    logger.info(
+        f"OpenLCA: {os.getenv('OPENLCA_HOST', 'localhost')}:{os.getenv('OPENLCA_PORT', '8080')}"
+    )
 
     # Test connection on startup
     try:
@@ -968,13 +1025,15 @@ async def main():
         logger.error(f"✗ Failed to connect to openLCA: {e}")
         logger.error("Make sure openLCA is running with IPC server started")
 
-    # Run server
-    async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            server.create_initialization_options()
-        )
+    if transport == "sse":
+        await _run_sse_server()
+    else:
+        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+            await server.run(
+                read_stream,
+                write_stream,
+                server.create_initialization_options()
+            )
 
 
 if __name__ == "__main__":

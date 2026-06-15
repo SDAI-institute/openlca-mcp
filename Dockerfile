@@ -1,0 +1,24 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install dependencies first (layer cached unless requirements change)
+COPY requirements.txt pyproject.toml ./
+RUN pip install --no-cache-dir \
+    -r requirements.txt \
+    uvicorn>=0.23.0 \
+    starlette>=0.27.0
+
+# Copy source
+COPY src/ ./src/
+
+# Non-root user for security
+RUN useradd -m -u 1000 mcp && chown -R mcp /app
+USER mcp
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
+
+CMD ["python", "-m", "src.server"]

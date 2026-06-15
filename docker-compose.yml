@@ -1,0 +1,28 @@
+# Local development — openLCA runs on the host machine
+# Usage:
+#   cp .env.example .env   # then set OPENLCA_PORT if non-default
+#   docker compose up --build
+#
+# MCP SSE endpoint: http://localhost:8000/sse
+# Health check:     http://localhost:8000/health
+
+services:
+  mcp-server:
+    build: .
+    ports:
+      - "${MCP_PORT:-8000}:8000"
+    environment:
+      TRANSPORT: sse
+      # Reach openLCA running on the host machine
+      OPENLCA_HOST: host.docker.internal
+      OPENLCA_PORT: ${OPENLCA_PORT:-8080}
+      MCP_HOST: "0.0.0.0"
+      MCP_PORT: "8000"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    env_file:
+      - path: .env
+        required: false
+    # Maps host.docker.internal → host IP on Linux (Docker Desktop handles this automatically)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped

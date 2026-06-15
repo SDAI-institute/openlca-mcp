@@ -1,0 +1,72 @@
+# Production — domain-exposed with Traefik reverse proxy + automatic TLS (Let's Encrypt)
+#
+# Prerequisites:
+#   1. Point your domain DNS A-record → this server's public IP
+#   2. Copy .env.example → .env and fill in MCP_DOMAIN, ACME_EMAIL, OPENLCA_HOST
+#   3. Create the Let's Encrypt storage file:
+#        mkdir -p docker/letsencrypt && touch docker/letsencrypt/acme.json && chmod 600 docker/letsencrypt/acme.json
+#   4. docker compose -f docker-compose.prod.yml up -d
+#
+# MCP SSE endpoint: https://<MCP_DOMAIN>/sse
+# Health check:     https://<MCP_DOMAIN>/health
+
+services:
+  traefik:
+    image: traefik:v3.1
+    restart: unless-stopped
+    command:
+      - "--log.level=${LOG_LEVEL:-INFO}"
+      - "--api.dashboard=false"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      # Redirect all HTTP → HTTPS
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--entrypoints.web.http.redirections.entrypoint.permanent=true"
+      # Let's Encrypt TLS challenge
+      - "--certificatesresolvers.letsencrypt.acme.tlschallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+      - "./docker/letsencrypt:/letsencrypt"
+    networks:
+      - proxy
+
+  mcp-server:
+    build: .
+    restart: unless-stopped
+    environment:
+      TRANSPORT: sse
+      OPENLCA_HOST: ${OPENLCA_HOST}
+      OPENLCA_PORT: ${OPENLCA_PORT:-8080}
+      MCP_HOST: "0.0.0.0"
+      MCP_PORT: "8000"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    env_file:
+      - .env
+    # Only needed if openLCA runs on the same Docker host
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    labels:
+      - "traefik.enable=true"
+      # HTTPS router
+      - "traefik.http.routers.mcp.rule=Host(`${MCP_DOMAIN}`)"
+      - "traefik.http.routers.mcp.entrypoints=websecure"
+      - "traefik.http.routers.mcp.tls.certresolver=letsencrypt"
+      - "traefik.http.services.mcp.loadbalancer.server.port=8000"
+      # Optional: uncomment to protect the endpoint with HTTP Basic Auth
+      # Create credentials: echo $(htpasswd -nb user password) | sed -e s/\\$/\\$\\$/g
+      # - "traefik.http.routers.mcp.middlewares=mcp-auth"
+      # - "traefik.http.middlewares.mcp-auth.basicauth.users=${MCP_BASIC_AUTH}"
+    networks:
+      - proxy
+
+networks:
+  proxy:
+    name: proxy

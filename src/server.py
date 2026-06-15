@@ -1036,6 +1036,11 @@ async def main():
             )
 
 
-if __name__ == "__main__":
+def run():
+    """Synchronous entry point — used by installed CLI (`openlca-mcp`) and uvx."""
     import asyncio
     asyncio.run(main())
+
+
+if __name__ == "__main__":
+    run()

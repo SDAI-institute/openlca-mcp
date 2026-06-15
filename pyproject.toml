@@ -20,7 +20,7 @@ Repository = "https://github.com/dernestbank/openlca-mcp"
 Issues = "https://github.com/dernestbank/openlca-mcp/issues"
 
 [project.scripts]
-openlca-mcp = "src.server:main"
+openlca-mcp = "src.server:run"
 
 [project.optional-dependencies]
 http = [

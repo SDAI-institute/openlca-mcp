@@ -7,7 +7,8 @@
 #        mkdir -p docker/letsencrypt && touch docker/letsencrypt/acme.json && chmod 600 docker/letsencrypt/acme.json
 #   4. docker compose -f docker-compose.prod.yml up -d
 #
-# MCP SSE endpoint: https://<MCP_DOMAIN>/sse
+# MCP endpoint:     https://<MCP_DOMAIN>/mcp
+# Legacy SSE:       https://<MCP_DOMAIN>/sse
 # Health check:     https://<MCP_DOMAIN>/health
 
 services:
@@ -42,11 +43,15 @@ services:
     build: .
     restart: unless-stopped
     environment:
-      TRANSPORT: sse
+      TRANSPORT: http
       OPENLCA_HOST: ${OPENLCA_HOST}
       OPENLCA_PORT: ${OPENLCA_PORT:-8080}
       MCP_HOST: "0.0.0.0"
       MCP_PORT: "8000"
+      MCP_ENABLE_STREAMABLE_HTTP: "true"
+      MCP_ENABLE_SSE: "true"
+      MCP_STATELESS_HTTP: "true"
+      MCP_HTTP_JSON_RESPONSE: "true"
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     env_file:
       - .env

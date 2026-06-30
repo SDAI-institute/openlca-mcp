@@ -1,1044 +1,398 @@
 #!/usr/bin/env python3
 """
-OpenLCA MCP Server for Life Cycle Assessment Automation
+OpenLCA MCP Server for Life Cycle Assessment automation.
 
-This MCP server exposes openLCA functionality as tools for AI agents to automate
-Life Cycle Assessment workflows. Tools are organized by the 4 LCA phases:
+Exposes openLCA functionality as MCP tools for AI agents, organized by the four
+ISO-14040/14044 LCA phases (Goal & Scope, LCI, LCIA, Interpretation) plus
+utilities. This module owns transport wiring only; tool schemas live in
+``tool_defs``, handlers in ``handlers``, client management in ``lca_client``,
+and the result registry in ``result_store``.
 
-1. Goal & Scope Definition
-2. Life Cycle Inventory (LCI)
-3. Life Cycle Impact Assessment (LCIA)
-4. Interpretation
-
-Usage:
-    python -m src.server
+Supported transports:
+    - ``stdio``            local subprocess clients such as Claude Desktop
+    - ``sse``              legacy HTTP+SSE transport at ``/sse`` + ``/messages/``
+    - ``streamable-http``  modern MCP HTTP endpoint at ``/mcp``
+    - ``http``             serve both ``/mcp`` and legacy ``/sse`` together
 
 Environment Variables:
-    OPENLCA_PORT: Port for openLCA IPC server (default: 8080)
-    OPENLCA_HOST: Host for openLCA IPC server (default: localhost)
-    LOG_LEVEL: Logging level (default: INFO)
+    OPENLCA_PORT                  openLCA IPC port (default: 8080)
+    OPENLCA_HOST                  openLCA IPC host (default: localhost)
+    OPENLCA_READ_ONLY             Block all database writes when truthy
+    TRANSPORT                     stdio | sse | streamable-http | http
+    MCP_HOST / MCP_PORT           HTTP bind for network transports
+    MCP_HTTP_PATH                 Streamable HTTP endpoint path (default: /mcp)
+    MCP_SSE_PATH                  Legacy SSE endpoint path (default: /sse)
+    MCP_MESSAGE_PATH              Legacy SSE POST path (default: /messages/)
+    MCP_ENABLE_STREAMABLE_HTTP    Enable /mcp in TRANSPORT=http mode (default: true)
+    MCP_ENABLE_SSE                Enable /sse in TRANSPORT=http mode (default: true)
+    MCP_STATELESS_HTTP            Use stateless streamable HTTP sessions (default: true)
+    MCP_HTTP_JSON_RESPONSE        Prefer JSON responses for streamable HTTP (default: true)
+    MCP_SESSION_IDLE_TIMEOUT      Stateful streamable HTTP idle timeout in seconds
+    MCP_DNS_REBINDING_PROTECTION  Enable host/origin validation for HTTP transports
+    MCP_ALLOWED_HOSTS             Comma-separated Host allowlist when DNS protection is on
+    MCP_ALLOWED_ORIGINS           Comma-separated Origin allowlist when DNS protection is on
+    LOG_LEVEL                     Logging level (default: INFO)
 """
 
-import os
-import logging
+from __future__ import annotations
+
+import base64
 import json
-from typing import Any, Dict, List, Optional
-from contextlib import asynccontextmanager
+import logging
+import os
+import time
+from contextlib import AsyncExitStack, asynccontextmanager
+from typing import Any
 
-from mcp.server import Server
-from mcp.types import Tool, TextContent
 import mcp.server.stdio
+import mcp.types as types
+from mcp.server.lowlevel import NotificationOptions, Server
+from mcp.server.sse import SseServerTransport
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+from mcp.server.transport_security import TransportSecuritySettings
 
-from openlca_ipc import OLCAClient
-import olca_schema as o
+from . import __version__, telemetry
+from .lca_client import get_client
+from .result_store import store
+from .tool_defs import TOOLS
+from .handlers import TOOL_HANDLERS
+from . import responses
 
-# Configure logging
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
-# Global client instance
-_client: Optional[OLCAClient] = None
-
-
-def get_client() -> OLCAClient:
-    """Get or create OpenLCA client."""
-    global _client
-    if _client is None:
-        port = int(os.getenv("OPENLCA_PORT", "8080"))
-        host = os.getenv("OPENLCA_HOST", "localhost")
-        _client = OLCAClient(port=port)
-        # OLCAClient only accepts port; patch underlying ipc.Client for non-localhost hosts
-        # (needed when MCP server runs in Docker and openLCA is on the host machine)
-        if host not in ("localhost", "127.0.0.1"):
-            import olca_ipc as ipc
-            url = f"http://{host}:{port}"
-            try:
-                _client.client = ipc.Client(url=url)
-            except TypeError:
-                _client.client = ipc.Client(port)
-            logger.info(f"OpenLCA IPC client redirected → {url}")
-        logger.info(f"Connected to openLCA at {host}:{port}")
-    return _client
-
-
-# ============================================================================
-# PHASE 1: GOAL & SCOPE DEFINITION TOOLS
-# ============================================================================
-
-TOOL_SEARCH_FLOWS = Tool(
-    name="search_flows",
-    description=(
-        "Search for material flows in the openLCA database. "
-        "Use this to find materials, products, or elementary flows needed for your LCA study. "
-        "Keywords are case-insensitive and use partial matching (all keywords must be present). "
-        "Example: keywords=['steel', 'hot', 'rolled'] finds 'Steel, hot rolled, coil'"
-    ),
-    inputSchema={
-        "type": "object",
-        "properties": {
-            "keywords": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "List of keywords to search for (all must match)"
-            },
-            "max_results": {
-                "type": "integer",
-                "description": "Maximum number of results to return",
-                "default": 10
-            },
-            "flow_type": {
-                "type": "string",
-                "enum": ["PRODUCT_FLOW", "ELEMENTARY_FLOW", "WASTE_FLOW"],
-                "description": "Optional filter by flow type"
-            }
-        },
-        "required": ["keywords"]
-    }
+_SERVER_NAME = "openlca-lca-server"
+_SERVER_INSTRUCTIONS = (
+    "Use these tools for openLCA life-cycle assessment workflows. "
+    "Start with test_connection or health_check before calculations. "
+    "Call dispose_result when finished with a result_id. "
+    "Create and export tools mutate the environment; honor the server's read-only mode."
 )
+_SERVER_WEBSITE = "https://github.com/SDAI-institute/openlca-mcp"
 
-TOOL_SEARCH_PROCESSES = Tool(
-    name="search_processes",
-    description=(
-        "Search for processes in the openLCA database. "
-        "Use this to find existing production processes, transport processes, etc. "
-        "Keywords are case-insensitive and use partial matching."
-    ),
-    inputSchema={
-        "type": "object",
-        "properties": {
-            "keywords": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "List of keywords to search for"
-            },
-            "max_results": {
-                "type": "integer",
-                "description": "Maximum number of results",
-                "default": 10
-            }
-        },
-        "required": ["keywords"]
-    }
+# Self-contained icon (no external asset) advertised in the MCP serverInfo so
+# directories/clients (Smithery, ChatGPT) can render a recognizable mark.
+_SERVER_ICON_SVG = (
+    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'>"
+    "<rect width='64' height='64' rx='14' fill='#1f7a3d'/>"
+    "<path d='M32 14c-9 6-14 13-14 21a14 14 0 0 0 28 0c0-8-5-15-14-21z' fill='#fff'/>"
+    "<path d='M32 20v22' stroke='#1f7a3d' stroke-width='2.5' stroke-linecap='round'/>"
+    "<path d='M32 30l7-5M32 36l-7-5' stroke='#1f7a3d' stroke-width='2.5' "
+    "stroke-linecap='round' fill='none'/>"
+    "</svg>"
 )
-
-TOOL_SEARCH_IMPACT_METHODS = Tool(
-    name="search_impact_methods",
-    description=(
-        "Search for LCIA methods in the database. "
-        "Use this to find impact assessment methods like TRACI, ReCiPe, CML, ILCD, etc. "
-        "Common methods: TRACI (US EPA), ReCiPe (Europe), CML (baseline), ILCD (recommended)"
-    ),
-    inputSchema={
-        "type": "object",
-        "properties": {
-            "keywords": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Keywords for impact method (e.g., ['TRACI'], ['ReCiPe'])"
-            }
-        },
-        "required": ["keywords"]
-    }
-)
-
-TOOL_FIND_PROVIDERS = Tool(
-    name="find_providers",
-    description=(
-        "Find all processes that produce a specific flow. "
-        "Use this after searching for a flow to identify its production processes. "
-        "Returns list of provider process references."
-    ),
-    inputSchema={
-        "type": "object",
-        "properties": {
-            "flow_id": {
-                "type": "string",
-                "description": "ID of the flow to find providers for"
-            },
-            "flow_name": {
-                "type": "string",
-                "description": "Name of the flow (used if flow_id not provided)"
-            }
-        }
-    }
-)
-
-# ============================================================================
-# PHASE 2: LIFE CYCLE INVENTORY (LCI) TOOLS
-# ============================================================================
-
-TOOL_CREATE_PRODUCT_FLOW = Tool(
-    name="create_product_flow",
-    description=(
-        "Create a new product flow in openLCA. "
-        "Use this to define the product you're assessing or intermediate products. "
-        "Flow will be created with Mass property and kg unit."
-    ),
-    inputSchema={
-        "type": "object",
-        "properties": {
-            "name": {
-                "type": "string",
-                "description": "Name of the product flow"
-            },
-            "description": {
-                "type": "string",
-                "description": "Optional description"
-            }
-        },
-        "required": ["name"]
-    }
-)
-
-TOOL_CREATE_PROCESS = Tool(
-    name="create_process",
-    description=(
-        "Create a new process in openLCA with inputs and outputs. "
-        "This is a core LCI tool for defining unit processes. "
-        "Provide exchanges as list of objects with flow_id, amount, is_input, is_quantitative_reference, provider_id"
-    ),
-    inputSchema={
-        "type": "object",
-        "properties": {
-            "name": {
-                "type": "string",
-                "description": "Process name"
-            },
-            "description": {
-                "type": "string",
-                "description": "Process description"
-            },
-            "exchanges": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "flow_id": {"type": "string", "description": "Flow ID or name"},
-                        "amount": {"type": "number", "description": "Amount in kg"},
-                        "is_input": {"type": "boolean", "description": "True if input"},
-                        "is_quantitative_reference": {
-                            "type": "boolean",
-                            "description": "True if this is the main output"
-                        },
-                        "provider_id": {
-                            "type": "string",
-                            "description": "Optional provider process ID"
-                        }
-                    },
-                    "required": ["flow_id", "amount", "is_input"]
-                },
-                "description": "List of exchanges (inputs and outputs)"
-            }
-        },
-        "required": ["name", "exchanges"]
-    }
-)
-
-TOOL_CREATE_PRODUCT_SYSTEM = Tool(
-    name="create_product_system",
-    description=(
-        "Create a product system from a process. "
-        "Product systems define the scope of LCA and automatically link processes via exchanges. "
-        "Returns product system ID for use in calculations."
-    ),
-    inputSchema={
-        "type": "object",
-        "properties": {
-            "process_id": {
-                "type": "string",
-                "description": "ID of the process to create system from"
-            },
-            "process_name": {
-                "type": "string",
-                "description": "Name of process (if ID not provided)"
-            }
-        }
-    }
-)
-
-# ============================================================================
-# PHASE 3: LIFE CYCLE IMPACT ASSESSMENT (LCIA) TOOLS
-# ============================================================================
-
-TOOL_CALCULATE_IMPACTS = Tool(
-    name="calculate_impacts",
-    description=(
-        "Calculate environmental impacts for a product system. "
-        "This performs LCIA and returns total impacts for all impact categories. "
-        "Results include category name, amount, and unit. "
-        "IMPORTANT: Results must be disposed after use with dispose_result tool."
-    ),
-    inputSchema={
-        "type": "object",
-        "properties": {
-            "system_id": {
-                "type": "string",
-                "description": "Product system ID"
-            },
-            "system_name": {
-                "type": "string",
-                "description": "Product system name (if ID not provided)"
-            },
-            "method_id": {
-                "type": "string",
-                "description": "Impact method ID (from search_impact_methods)"
-            },
-            "method_keywords": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Keywords to find method (if ID not provided)"
-            },
-            "amount": {
-                "type": "number",
-                "description": "Reference amount (default: 1.0)",
-                "default": 1.0
-            }
-        }
-    }
-)
-
-TOOL_GET_INVENTORY = Tool(
-    name="get_inventory_results",
-    description=(
-        "Get detailed inventory results showing all flows and their amounts. "
-        "Use this to see the full life cycle inventory (LCI) before or after impact assessment. "
-        "Returns flows with amounts and units. Requires result_id from calculate_impacts."
-    ),
-    inputSchema={
-        "type": "object",
-        "properties": {
-            "result_id": {
-                "type": "string",
-                "description": "Result ID from calculate_impacts"
-            }
-        },
-        "required": ["result_id"]
-    }
-)
-
-# ============================================================================
-# PHASE 4: INTERPRETATION TOOLS
-# ============================================================================
-
-TOOL_CONTRIBUTION_ANALYSIS = Tool(
-    name="analyze_contributions",
-    description=(
-        "Analyze which processes or flows contribute most to an impact category. "
-        "Essential for interpretation phase - identifies hotspots in the system. "
-        "Returns top contributors with their share (%) and absolute amounts."
-    ),
-    inputSchema={
-        "type": "object",
-        "properties": {
-            "result_id": {
-                "type": "string",
-                "description": "Result ID from calculate_impacts"
-            },
-            "impact_category_id": {
-                "type": "string",
-                "description": "ID of impact category to analyze"
-            },
-            "n": {
-                "type": "integer",
-                "description": "Number of top contributors to return",
-                "default": 10
-            },
-            "min_share": {
-                "type": "number",
-                "description": "Minimum contribution share (0-1)",
-                "default": 0.01
-            }
-        },
-        "required": ["result_id", "impact_category_id"]
-    }
-)
-
-TOOL_MONTE_CARLO = Tool(
-    name="run_monte_carlo",
-    description=(
-        "Run Monte Carlo uncertainty analysis to quantify uncertainty in results. "
-        "Returns statistical summary: mean, std deviation, CV, percentiles. "
-        "Use this for robust interpretation and decision-making. "
-        "WARNING: Can be time-consuming for large systems."
-    ),
-    inputSchema={
-        "type": "object",
-        "properties": {
-            "system_id": {
-                "type": "string",
-                "description": "Product system ID"
-            },
-            "method_id": {
-                "type": "string",
-                "description": "Impact method ID"
-            },
-            "iterations": {
-                "type": "integer",
-                "description": "Number of Monte Carlo iterations",
-                "default": 100
-            }
-        },
-        "required": ["system_id", "method_id"]
-    }
-)
-
-TOOL_EXPORT_RESULTS = Tool(
-    name="export_results",
-    description=(
-        "Export calculation results to CSV or JSON format. "
-        "Use this to save results for reporting and further analysis. "
-        "Supports both impact results and inventory results."
-    ),
-    inputSchema={
-        "type": "object",
-        "properties": {
-            "data": {
-                "type": "object",
-                "description": "Results data to export (from calculate_impacts or other tools)"
-            },
-            "filename": {
-                "type": "string",
-                "description": "Output filename"
-            },
-            "format": {
-                "type": "string",
-                "enum": ["csv", "json"],
-                "description": "Export format",
-                "default": "csv"
-            }
-        },
-        "required": ["data", "filename"]
-    }
-)
-
-TOOL_DISPOSE_RESULT = Tool(
-    name="dispose_result",
-    description=(
-        "Dispose of calculation result to free memory. "
-        "CRITICAL: Always call this after finishing with results from calculate_impacts. "
-        "Prevents memory leaks in openLCA server."
-    ),
-    inputSchema={
-        "type": "object",
-        "properties": {
-            "result_id": {
-                "type": "string",
-                "description": "Result ID to dispose"
-            }
-        },
-        "required": ["result_id"]
-    }
-)
-
-# ============================================================================
-# UTILITY TOOLS
-# ============================================================================
-
-TOOL_TEST_CONNECTION = Tool(
-    name="test_connection",
-    description=(
-        "Test connection to openLCA IPC server. "
-        "Use this first to verify openLCA is running and accessible. "
-        "Returns connection status and server info."
-    ),
-    inputSchema={
-        "type": "object",
-        "properties": {},
-    }
-)
-
-TOOL_LIST_DATABASES = Tool(
-    name="list_databases",
-    description=(
-        "List all available databases in openLCA. "
-        "Shows which databases are available for LCA studies."
-    ),
-    inputSchema={
-        "type": "object",
-        "properties": {},
-    }
+_SERVER_ICON_DATA_URI = (
+    "data:image/svg+xml;base64,"
+    + base64.b64encode(_SERVER_ICON_SVG.encode("utf-8")).decode("ascii")
 )
 
 
-# ============================================================================
-# TOOL IMPLEMENTATIONS
-# ============================================================================
-
-# Store active results for disposal
-_active_results: Dict[str, Any] = {}
-
-
-async def handle_search_flows(arguments: dict) -> List[TextContent]:
-    """Handle search_flows tool call."""
-    try:
-        client = get_client()
-        keywords = arguments["keywords"]
-        max_results = arguments.get("max_results", 10)
-        flow_type_str = arguments.get("flow_type")
-
-        flow_type = None
-        if flow_type_str:
-            flow_type = getattr(o.FlowType, flow_type_str)
-
-        flows = client.search.find_flows(keywords, max_results, flow_type)
-
-        results = [
-            {
-                "id": f.id,
-                "name": f.name,
-                "category": f.category if hasattr(f, 'category') else None
-            }
-            for f in flows
-        ]
-
-        return [TextContent(
-            type="text",
-            text=json.dumps({
-                "success": True,
-                "count": len(results),
-                "flows": results
-            }, indent=2)
-        )]
-
-    except Exception as e:
-        logger.error(f"Error in search_flows: {e}", exc_info=True)
-        return [TextContent(
-            type="text",
-            text=json.dumps({"success": False, "error": str(e)}, indent=2)
-        )]
-
-
-async def handle_search_processes(arguments: dict) -> List[TextContent]:
-    """Handle search_processes tool call."""
-    try:
-        client = get_client()
-        keywords = arguments["keywords"]
-        max_results = arguments.get("max_results", 10)
-
-        processes = client.search.find_processes(keywords, max_results)
-
-        results = [
-            {
-                "id": p.id,
-                "name": p.name,
-                "category": p.category if hasattr(p, 'category') else None
-            }
-            for p in processes
-        ]
-
-        return [TextContent(
-            type="text",
-            text=json.dumps({
-                "success": True,
-                "count": len(results),
-                "processes": results
-            }, indent=2)
-        )]
-
-    except Exception as e:
-        logger.error(f"Error in search_processes: {e}", exc_info=True)
-        return [TextContent(
-            type="text",
-            text=json.dumps({"success": False, "error": str(e)}, indent=2)
-        )]
-
-
-async def handle_search_impact_methods(arguments: dict) -> List[TextContent]:
-    """Handle search_impact_methods tool call."""
-    try:
-        client = get_client()
-        keywords = arguments["keywords"]
-
-        method = client.search.find_impact_method(keywords)
-
-        if method:
-            result = {
-                "success": True,
-                "method": {
-                    "id": method.id,
-                    "name": method.name,
-                    "categories": [
-                        {"id": cat.id, "name": cat.name}
-                        for cat in (method.impact_categories or [])
-                    ]
-                }
-            }
-        else:
-            result = {
-                "success": False,
-                "error": f"Impact method not found with keywords: {keywords}"
-            }
-
-        return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
-    except Exception as e:
-        logger.error(f"Error in search_impact_methods: {e}", exc_info=True)
-        return [TextContent(
-            type="text",
-            text=json.dumps({"success": False, "error": str(e)}, indent=2)
-        )]
-
-
-async def handle_find_providers(arguments: dict) -> List[TextContent]:
-    """Handle find_providers tool call."""
-    try:
-        client = get_client()
-
-        # Get flow reference
-        if "flow_id" in arguments:
-            flow_ref = o.Ref(id=arguments["flow_id"])
-        elif "flow_name" in arguments:
-            flows = client.search.find_flows([arguments["flow_name"]], max_results=1)
-            if not flows:
-                return [TextContent(
-                    type="text",
-                    text=json.dumps({
-                        "success": False,
-                        "error": f"Flow not found: {arguments['flow_name']}"
-                    }, indent=2)
-                )]
-            flow_ref = flows[0]
-        else:
-            return [TextContent(
-                type="text",
-                text=json.dumps({
-                    "success": False,
-                    "error": "Either flow_id or flow_name must be provided"
-                }, indent=2)
-            )]
-
-        providers = client.search.find_providers(flow_ref)
-
-        results = [
-            {"id": p.id, "name": p.name}
-            for p in providers
-        ]
-
-        return [TextContent(
-            type="text",
-            text=json.dumps({
-                "success": True,
-                "count": len(results),
-                "providers": results
-            }, indent=2)
-        )]
-
-    except Exception as e:
-        logger.error(f"Error in find_providers: {e}", exc_info=True)
-        return [TextContent(
-            type="text",
-            text=json.dumps({"success": False, "error": str(e)}, indent=2)
-        )]
-
-
-async def handle_create_product_flow(arguments: dict) -> List[TextContent]:
-    """Handle create_product_flow tool call."""
-    try:
-        client = get_client()
-        name = arguments["name"]
-        description = arguments.get("description", "")
-
-        flow = client.data.create_product_flow(name, description)
-
-        return [TextContent(
-            type="text",
-            text=json.dumps({
-                "success": True,
-                "flow": {
-                    "id": flow.id,
-                    "name": flow.name,
-                    "description": flow.description
-                }
-            }, indent=2)
-        )]
-
-    except Exception as e:
-        logger.error(f"Error in create_product_flow: {e}", exc_info=True)
-        return [TextContent(
-            type="text",
-            text=json.dumps({"success": False, "error": str(e)}, indent=2)
-        )]
-
-
-async def handle_create_process(arguments: dict) -> List[TextContent]:
-    """Handle create_process tool call."""
-    try:
-        client = get_client()
-        name = arguments["name"]
-        description = arguments.get("description", "")
-        exchanges_data = arguments["exchanges"]
-
-        # Create exchanges
-        exchanges = []
-        for ex_data in exchanges_data:
-            # Get flow
-            flow_id = ex_data["flow_id"]
-            flows = client.search.find_flows([flow_id], max_results=1)
-            if not flows:
-                # Try as ID directly
-                flow_ref = o.Ref(id=flow_id)
-            else:
-                flow_ref = flows[0]
-
-            # Get provider if specified
-            provider = None
-            if "provider_id" in ex_data:
-                provider = o.Ref(id=ex_data["provider_id"])
-
-            exchange = client.data.create_exchange(
-                flow_ref,
-                ex_data["amount"],
-                ex_data["is_input"],
-                ex_data.get("is_quantitative_reference", False),
-                provider
-            )
-            exchanges.append(exchange)
-
-        process = client.data.create_process(name, description, exchanges)
-
-        return [TextContent(
-            type="text",
-            text=json.dumps({
-                "success": True,
-                "process": {
-                    "id": process.id,
-                    "name": process.name,
-                    "description": process.description
-                }
-            }, indent=2)
-        )]
-
-    except Exception as e:
-        logger.error(f"Error in create_process: {e}", exc_info=True)
-        return [TextContent(
-            type="text",
-            text=json.dumps({"success": False, "error": str(e)}, indent=2)
-        )]
-
-
-async def handle_create_product_system(arguments: dict) -> List[TextContent]:
-    """Handle create_product_system tool call."""
-    try:
-        client = get_client()
-
-        # Get process reference
-        if "process_id" in arguments:
-            process_ref = o.Ref(id=arguments["process_id"])
-        elif "process_name" in arguments:
-            processes = client.search.find_processes([arguments["process_name"]], max_results=1)
-            if not processes:
-                return [TextContent(
-                    type="text",
-                    text=json.dumps({
-                        "success": False,
-                        "error": f"Process not found: {arguments['process_name']}"
-                    }, indent=2)
-                )]
-            process_ref = processes[0]
-        else:
-            return [TextContent(
-                type="text",
-                text=json.dumps({
-                    "success": False,
-                    "error": "Either process_id or process_name must be provided"
-                }, indent=2)
-            )]
-
-        system = client.systems.create_product_system(process_ref)
-
-        return [TextContent(
-            type="text",
-            text=json.dumps({
-                "success": True,
-                "product_system": {
-                    "id": system.id,
-                    "name": system.name
-                }
-            }, indent=2)
-        )]
-
-    except Exception as e:
-        logger.error(f"Error in create_product_system: {e}", exc_info=True)
-        return [TextContent(
-            type="text",
-            text=json.dumps({"success": False, "error": str(e)}, indent=2)
-        )]
-
-
-async def handle_calculate_impacts(arguments: dict) -> List[TextContent]:
-    """Handle calculate_impacts tool call."""
-    try:
-        client = get_client()
-
-        # Get system
-        if "system_id" in arguments:
-            system_ref = o.Ref(id=arguments["system_id"])
-        elif "system_name" in arguments:
-            # Search by name (simplified - may need better lookup)
-            system_ref = o.Ref(id=arguments["system_name"])
-        else:
-            return [TextContent(
-                type="text",
-                text=json.dumps({
-                    "success": False,
-                    "error": "Either system_id or system_name must be provided"
-                }, indent=2)
-            )]
-
-        # Get method
-        if "method_id" in arguments:
-            method = client.client.get(o.ImpactMethod, arguments["method_id"])
-        elif "method_keywords" in arguments:
-            method = client.search.find_impact_method(arguments["method_keywords"])
-        else:
-            return [TextContent(
-                type="text",
-                text=json.dumps({
-                    "success": False,
-                    "error": "Either method_id or method_keywords must be provided"
-                }, indent=2)
-            )]
-
-        if not method:
-            return [TextContent(
-                type="text",
-                text=json.dumps({
-                    "success": False,
-                    "error": "Impact method not found"
-                }, indent=2)
-            )]
-
-        amount = arguments.get("amount", 1.0)
-
-        # Calculate
-        result = client.calculate.simple_calculation(system_ref, method, amount)
-
-        # Store result for later disposal
-        result_id = str(id(result))
-        _active_results[result_id] = result
-
-        # Get impacts
-        impacts = client.results.get_total_impacts(result)
-
-        return [TextContent(
-            type="text",
-            text=json.dumps({
-                "success": True,
-                "result_id": result_id,
-                "impacts": impacts,
-                "message": "IMPORTANT: Call dispose_result when done with this result_id"
-            }, indent=2)
-        )]
-
-    except Exception as e:
-        logger.error(f"Error in calculate_impacts: {e}", exc_info=True)
-        return [TextContent(
-            type="text",
-            text=json.dumps({"success": False, "error": str(e)}, indent=2)
-        )]
-
-
-async def handle_dispose_result(arguments: dict) -> List[TextContent]:
-    """Handle dispose_result tool call."""
-    try:
-        result_id = arguments["result_id"]
-
-        if result_id in _active_results:
-            result = _active_results[result_id]
-            result.dispose()
-            del _active_results[result_id]
-            return [TextContent(
-                type="text",
-                text=json.dumps({
-                    "success": True,
-                    "message": f"Result {result_id} disposed successfully"
-                }, indent=2)
-            )]
-        else:
-            return [TextContent(
-                type="text",
-                text=json.dumps({
-                    "success": False,
-                    "error": f"Result {result_id} not found"
-                }, indent=2)
-            )]
-
-    except Exception as e:
-        logger.error(f"Error in dispose_result: {e}", exc_info=True)
-        return [TextContent(
-            type="text",
-            text=json.dumps({"success": False, "error": str(e)}, indent=2)
-        )]
-
-
-async def handle_test_connection(arguments: dict) -> List[TextContent]:
-    """Handle test_connection tool call."""
-    try:
-        client = get_client()
-        is_connected = client.test_connection()
-
-        return [TextContent(
-            type="text",
-            text=json.dumps({
-                "success": True,
-                "connected": is_connected,
-                "port": client.port
-            }, indent=2)
-        )]
-
-    except Exception as e:
-        logger.error(f"Error in test_connection: {e}", exc_info=True)
-        return [TextContent(
-            type="text",
-            text=json.dumps({"success": False, "error": str(e)}, indent=2)
-        )]
-
-
-# Map tool names to handlers
-TOOL_HANDLERS = {
-    "search_flows": handle_search_flows,
-    "search_processes": handle_search_processes,
-    "search_impact_methods": handle_search_impact_methods,
-    "find_providers": handle_find_providers,
-    "create_product_flow": handle_create_product_flow,
-    "create_process": handle_create_process,
-    "create_product_system": handle_create_product_system,
-    "calculate_impacts": handle_calculate_impacts,
-    "dispose_result": handle_dispose_result,
-    "test_connection": handle_test_connection,
-}
-
-
-# ============================================================================
-# MCP SERVER SETUP
-# ============================================================================
-
-# Create server instance
-server = Server("openlca-lca-server")
+def _truthy(value: str | None, default: bool = False) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _csv_env(name: str) -> list[str]:
+    raw = os.getenv(name, "")
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def _normalize_http_path(path: str, *, trailing_slash: bool = False) -> str:
+    path = path.strip() or "/"
+    if not path.startswith("/"):
+        path = f"/{path}"
+    if trailing_slash:
+        return path if path.endswith("/") else f"{path}/"
+    return path.rstrip("/") or "/"
+
+
+def _transport_security_settings() -> TransportSecuritySettings | None:
+    enabled = _truthy(os.getenv("MCP_DNS_REBINDING_PROTECTION"), default=False)
+    hosts = _csv_env("MCP_ALLOWED_HOSTS")
+    origins = _csv_env("MCP_ALLOWED_ORIGINS")
+    if not enabled and not hosts and not origins:
+        return None
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=enabled,
+        allowed_hosts=hosts,
+        allowed_origins=origins,
+    )
+
+
+def _parse_idle_timeout() -> float | None:
+    raw = os.getenv("MCP_SESSION_IDLE_TIMEOUT", "").strip()
+    if not raw:
+        return None
+    return float(raw)
+
+
+def _http_mode() -> tuple[bool, bool]:
+    transport = os.getenv("TRANSPORT", "stdio").strip().lower()
+    if transport == "stdio":
+        return False, False
+    if transport == "sse":
+        return False, True
+    if transport in {"streamable-http", "streamable_http"}:
+        return True, False
+    if transport == "http":
+        return (
+            _truthy(os.getenv("MCP_ENABLE_STREAMABLE_HTTP"), default=True),
+            _truthy(os.getenv("MCP_ENABLE_SSE"), default=True),
+        )
+    raise ValueError(
+        "TRANSPORT must be one of: stdio, sse, streamable-http, streamable_http, http"
+    )
+
+
+# Fail fast on the bug class this refactor fixes: every advertised tool must
+# have a handler and vice versa.
+_missing_handlers = set(TOOLS) - set(TOOL_HANDLERS)
+_missing_defs = set(TOOL_HANDLERS) - set(TOOLS)
+if _missing_handlers or _missing_defs:
+    raise RuntimeError(
+        f"Tool/handler mismatch — missing handlers: {sorted(_missing_handlers)}; "
+        f"missing defs: {sorted(_missing_defs)}"
+    )
+
+server = Server(
+    _SERVER_NAME,
+    version=__version__,
+    instructions=_SERVER_INSTRUCTIONS,
+    website_url=_SERVER_WEBSITE,
+    icons=[types.Icon(src=_SERVER_ICON_DATA_URI, mimeType="image/svg+xml", sizes=["any"])],
+)
 
 
 @server.list_tools()
-async def list_tools() -> list[Tool]:
-    """List all available LCA tools organized by phase."""
-    return [
-        # Phase 1: Goal & Scope
-        TOOL_TEST_CONNECTION,
-        TOOL_SEARCH_FLOWS,
-        TOOL_SEARCH_PROCESSES,
-        TOOL_SEARCH_IMPACT_METHODS,
-        TOOL_FIND_PROVIDERS,
-        # Phase 2: LCI
-        TOOL_CREATE_PRODUCT_FLOW,
-        TOOL_CREATE_PROCESS,
-        TOOL_CREATE_PRODUCT_SYSTEM,
-        # Phase 3: LCIA
-        TOOL_CALCULATE_IMPACTS,
-        # Phase 4: Interpretation
-        TOOL_CONTRIBUTION_ANALYSIS,
-        TOOL_MONTE_CARLO,
-        TOOL_EXPORT_RESULTS,
-        # Utilities
-        TOOL_DISPOSE_RESULT,
-    ]
+async def list_tools() -> list[types.Tool]:
+    """Advertise exactly the tools that have handlers."""
+    return list(TOOLS.values())
 
 
 @server.call_tool()
-async def call_tool(name: str, arguments: Any) -> list[TextContent]:
-    """Handle tool calls from AI agents."""
-    logger.info(f"Tool called: {name} with arguments: {arguments}")
-
+async def call_tool(name: str, arguments: Any) -> types.CallToolResult:
+    """Dispatch a tool call to its handler and expose structured MCP results."""
+    logger.info("Tool called: %s", name)
     handler = TOOL_HANDLERS.get(name)
-    if not handler:
-        return [TextContent(
-            type="text",
-            text=json.dumps({
+    if handler is None:
+        telemetry.record(name, success=False, error_code="UNKNOWN_TOOL", duration_ms=0)
+        return types.CallToolResult(
+            content=[
+                types.TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {
+                            "success": False,
+                            "is_error": True,
+                            "error_code": "UNKNOWN_TOOL",
+                            "message": f"Unknown tool: {name}",
+                            "recoverable": False,
+                            "suggested_next_actions": ["list_tools"],
+                        },
+                        indent=2,
+                    ),
+                )
+            ],
+            structuredContent={
                 "success": False,
-                "error": f"Unknown tool: {name}"
-            }, indent=2)
-        )]
-
-    return await handler(arguments)
-
-
-async def _run_sse_server() -> None:
-    """Run MCP server with HTTP/SSE transport for network and Docker deployments."""
-    try:
-        from mcp.server.sse import SseServerTransport
-        from starlette.applications import Starlette
-        from starlette.responses import JSONResponse
-        from starlette.routing import Mount, Route
-        import uvicorn
-    except ImportError as exc:
-        logger.error(
-            "SSE transport requires additional packages: pip install 'openlca-mcp-server[http]'"
+                "is_error": True,
+                "error_code": "UNKNOWN_TOOL",
+                "message": f"Unknown tool: {name}",
+                "recoverable": False,
+                "suggested_next_actions": ["list_tools"],
+            },
+            isError=True,
         )
-        raise SystemExit(1) from exc
 
-    sse = SseServerTransport("/messages/")
+    start = time.monotonic()
+    legacy_result = await handler(arguments or {})
+    duration_ms = (time.monotonic() - start) * 1000
+    payload = responses.parse_json_content(legacy_result) or {}
+    success = payload.get("success", True)
+    error_code = payload.get("error_code") if success is False else None
+    telemetry.record(name, success=bool(success), error_code=error_code, duration_ms=duration_ms)
+    return responses.to_call_tool_result(legacy_result)
 
-    async def handle_sse(request):
-        async with sse.connect_sse(
-            request.scope, request.receive, request._send
-        ) as streams:
-            await server.run(streams[0], streams[1], server.create_initialization_options())
 
-    async def health(request):
-        return JSONResponse({"status": "ok", "server": "openlca-mcp", "version": "0.1.0"})
-
-    app = Starlette(
-        routes=[
-            Route("/health", endpoint=health),
-            Route("/sse", endpoint=handle_sse),
-            Mount("/messages/", app=sse.handle_post_message),
-        ]
+def _initialization_options() -> Any:
+    return server.create_initialization_options(
+        notification_options=NotificationOptions(),
+        experimental_capabilities={},
     )
+
+
+async def _run_stdio_server() -> None:
+    async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+        await server.run(read_stream, write_stream, _initialization_options())
+
+
+async def _run_http_server() -> None:
+    from starlette.applications import Starlette
+    from starlette.middleware import Middleware
+    from starlette.middleware.cors import CORSMiddleware
+    from starlette.responses import JSONResponse, Response
+    from starlette.routing import Mount, Route
+    import uvicorn
+
+    enable_streamable_http, enable_sse = _http_mode()
+    if not enable_streamable_http and not enable_sse:
+        raise RuntimeError(
+            "HTTP mode requires at least one of MCP_ENABLE_STREAMABLE_HTTP or MCP_ENABLE_SSE"
+        )
 
     host = os.getenv("MCP_HOST", "0.0.0.0")
     port = int(os.getenv("MCP_PORT", "8000"))
-    logger.info(f"MCP SSE server → http://{host}:{port}/sse")
+    http_path = _normalize_http_path(os.getenv("MCP_HTTP_PATH", "/mcp"))
+    sse_path = _normalize_http_path(os.getenv("MCP_SSE_PATH", "/sse"))
+    message_path = _normalize_http_path(
+        os.getenv("MCP_MESSAGE_PATH", "/messages/"),
+        trailing_slash=True,
+    )
+    security_settings = _transport_security_settings()
+    session_manager = (
+        StreamableHTTPSessionManager(
+            app=server,
+            json_response=_truthy(os.getenv("MCP_HTTP_JSON_RESPONSE"), default=True),
+            stateless=_truthy(os.getenv("MCP_STATELESS_HTTP"), default=True),
+            security_settings=security_settings,
+            session_idle_timeout=_parse_idle_timeout(),
+        )
+        if enable_streamable_http
+        else None
+    )
+    sse_transport = (
+        SseServerTransport(message_path, security_settings=security_settings)
+        if enable_sse
+        else None
+    )
+
+    async def index(request):
+        return JSONResponse(
+            {
+                "status": "ok",
+                "server": "openlca-mcp",
+                "version": __version__,
+                "transport": os.getenv("TRANSPORT", "stdio").strip().lower(),
+                "preferred_endpoint": http_path if enable_streamable_http else sse_path,
+                "endpoints": {
+                    "mcp": http_path if enable_streamable_http else None,
+                    "sse": sse_path if enable_sse else None,
+                    "messages": message_path if enable_sse else None,
+                    "health": "/health",
+                },
+            }
+        )
+
+    async def health(request):
+        return JSONResponse(
+            {
+                "status": "ok",
+                "server": "openlca-mcp",
+                "version": __version__,
+                "endpoints": {
+                    "mcp": http_path if enable_streamable_http else None,
+                    "sse": sse_path if enable_sse else None,
+                },
+            }
+        )
+
+    async def handle_sse(request):
+        assert sse_transport is not None
+        async with sse_transport.connect_sse(
+            request.scope, request.receive, request._send
+        ) as streams:
+            await server.run(streams[0], streams[1], _initialization_options())
+        return Response()
+
+    async def streamable_http_app(scope, receive, send):
+        assert session_manager is not None
+        await session_manager.handle_request(scope, receive, send)
+
+    routes = [
+        Route("/", endpoint=index, methods=["GET"]),
+        Route("/health", endpoint=health, methods=["GET"]),
+    ]
+    if enable_streamable_http:
+        routes.append(Mount(http_path, app=streamable_http_app))
+    if enable_sse:
+        routes.append(Route(sse_path, endpoint=handle_sse, methods=["GET"]))
+        routes.append(Mount(message_path, app=sse_transport.handle_post_message))
+
+    @asynccontextmanager
+    async def lifespan(app: Starlette):
+        async with AsyncExitStack() as stack:
+            if session_manager is not None:
+                await stack.enter_async_context(session_manager.run())
+            yield
+
+    app = Starlette(
+        routes=routes,
+        lifespan=lifespan,
+        middleware=[
+            Middleware(
+                CORSMiddleware,
+                allow_origins=["*"],
+                allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+                allow_headers=["*"],
+                expose_headers=["Mcp-Session-Id"],
+            )
+        ],
+    )
+
+    logger.info("HTTP MCP server -> http://%s:%s%s", host, port, http_path)
+    if enable_sse:
+        logger.info("Legacy SSE endpoint -> http://%s:%s%s", host, port, sse_path)
+
     config = uvicorn.Config(
-        app, host=host, port=port,
+        app,
+        host=host,
+        port=port,
         log_level=os.getenv("LOG_LEVEL", "info").lower(),
+        proxy_headers=True,
+        forwarded_allow_ips="*",
     )
     await uvicorn.Server(config).serve()
 
 
-async def main():
-    """Run the MCP server."""
-    transport = os.getenv("TRANSPORT", "stdio").lower()
-    logger.info(f"Starting OpenLCA MCP Server (transport={transport})...")
+async def main() -> None:
+    """Run the MCP server with the configured transport."""
+    transport = os.getenv("TRANSPORT", "stdio").strip().lower()
+    logger.info("Starting OpenLCA MCP Server v%s (transport=%s)", __version__, transport)
     logger.info(
-        f"OpenLCA: {os.getenv('OPENLCA_HOST', 'localhost')}:{os.getenv('OPENLCA_PORT', '8080')}"
+        "OpenLCA: %s:%s",
+        os.getenv("OPENLCA_HOST", "localhost"),
+        os.getenv("OPENLCA_PORT", "8080"),
     )
+    telemetry.setup(__version__, transport)
 
-    # Test connection on startup
     try:
-        client = get_client()
-        if client.test_connection():
-            logger.info("✓ Successfully connected to openLCA")
+        if get_client().test_connection():
+            logger.info("Successfully connected to openLCA")
         else:
-            logger.warning("⚠ Could not verify connection to openLCA")
-    except Exception as e:
-        logger.error(f"✗ Failed to connect to openLCA: {e}")
-        logger.error("Make sure openLCA is running with IPC server started")
+            logger.warning("Could not verify connection to openLCA")
+    except Exception as exc:
+        logger.error("Failed to connect to openLCA: %s", exc)
+        logger.error("Make sure openLCA is running with the IPC server started")
 
-    if transport == "sse":
-        await _run_sse_server()
-    else:
-        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-            await server.run(
-                read_stream,
-                write_stream,
-                server.create_initialization_options()
-            )
+    try:
+        if transport == "stdio":
+            await _run_stdio_server()
+        else:
+            await _run_http_server()
+    finally:
+        disposed = store.dispose_all()
+        if disposed:
+            logger.info("Disposed %s tracked result(s) on shutdown", disposed)
 
 
-def run():
-    """Synchronous entry point — used by installed CLI (`openlca-mcp`) and uvx."""
+def run() -> None:
+    """Synchronous entry point used by the installed CLI and uvx."""
     import asyncio
+
     asyncio.run(main())
 
 

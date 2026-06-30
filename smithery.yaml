@@ -1,0 +1,60 @@
+# Smithery configuration for the openLCA MCP server.
+# Docs: https://smithery.ai/docs/build/project-config
+#
+# This server wraps a *local* openLCA IPC instance, so a Smithery-hosted run
+# only succeeds when it can reach an openLCA IPC server at the configured host
+# (see the `openlcaHost` config below). Most users self-host behind the
+# streaming gateway (docker-compose.gateway.yml) and point a tunnel at it; this
+# file primarily declares metadata + a typed config schema so the server lists
+# and scores cleanly in the registry.
+
+runtime: container
+
+build:
+  dockerfile: Dockerfile
+  dockerBuildPath: .
+
+startCommand:
+  type: http
+  # All configuration is OPTIONAL — sensible defaults let the server start
+  # without any input, then connect to openLCA when one is reachable.
+  configSchema:
+    type: object
+    additionalProperties: false
+    required: []
+    properties:
+      openlcaHost:
+        type: string
+        title: openLCA host
+        description: >-
+          Hostname or IP where the openLCA IPC server is running. Use
+          host.docker.internal when openLCA runs on the same machine as this
+          container.
+        default: host.docker.internal
+      openlcaPort:
+        type: integer
+        title: openLCA IPC port
+        description: Port of the openLCA IPC server (openLCA → Tools → Developer tools → IPC server).
+        default: 8080
+        minimum: 1
+        maximum: 65535
+      readOnly:
+        type: boolean
+        title: Read-only mode
+        description: >-
+          Block every database write (create_product_flow / create_process /
+          create_product_system). Reads, searches, and calculations are
+          unaffected.
+        default: false
+      logLevel:
+        type: string
+        title: Log level
+        description: Python logging level for the server.
+        enum: [DEBUG, INFO, WARNING, ERROR]
+        default: INFO
+  # Map typed config → the environment variables the server reads (src/server.py).
+  exampleConfig:
+    openlcaHost: host.docker.internal
+    openlcaPort: 8080
+    readOnly: false
+    logLevel: INFO

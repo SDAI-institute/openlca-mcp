@@ -42,7 +42,7 @@ Claude Desktop `claude_desktop_config.json`:
 
 ---
 
-## 2. Local Docker (SSE over HTTP)
+## 2. Local Docker (remote MCP over HTTP)
 
 openLCA runs on your host machine; the MCP server runs in a container and reaches it via `host.docker.internal`.
 
@@ -53,10 +53,16 @@ docker compose up --build
 ```
 
 **Endpoints:**
-- MCP SSE: `http://localhost:8000/sse`
+- MCP:      `http://localhost:8000/mcp`
+- Legacy SSE: `http://localhost:8000/sse`
 - Health:   `http://localhost:8000/health`
 
-**n8n MCP node config:**
+**OpenAI / ChatGPT app URL:**
+```text
+http://localhost:8000/mcp
+```
+
+**Legacy SSE client config:**
 ```json
 {
   "serverType": "sse",
@@ -103,7 +109,8 @@ docker compose -f docker-compose.prod.yml up -d
 ```
 
 **Endpoints:**
-- MCP SSE: `https://mcp.yourdomain.com/sse`
+- MCP:      `https://mcp.yourdomain.com/mcp`
+- Legacy SSE: `https://mcp.yourdomain.com/sse`
 - Health:   `https://mcp.yourdomain.com/health`
 
 ### 3c. Optional: HTTP Basic Auth
@@ -155,11 +162,18 @@ docker compose -f docker-compose.prod.yml down
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `TRANSPORT` | `stdio` | `stdio` or `sse` |
+| `TRANSPORT` | `stdio` | `stdio`, `sse`, `streamable-http`, or `http` |
 | `OPENLCA_HOST` | `localhost` | Host running openLCA IPC server |
 | `OPENLCA_PORT` | `8080` | openLCA IPC port |
-| `MCP_HOST` | `0.0.0.0` | Bind address for SSE HTTP server |
-| `MCP_PORT` | `8000` | Port for SSE HTTP server |
+| `MCP_HOST` | `0.0.0.0` | Bind address for network transports |
+| `MCP_PORT` | `8000` | Port for network transports |
+| `MCP_HTTP_PATH` | `/mcp` | Streamable HTTP endpoint path |
+| `MCP_SSE_PATH` | `/sse` | Legacy SSE GET endpoint path |
+| `MCP_MESSAGE_PATH` | `/messages/` | Legacy SSE POST endpoint path |
+| `MCP_ENABLE_STREAMABLE_HTTP` | `true` | Enable `/mcp` when `TRANSPORT=http` |
+| `MCP_ENABLE_SSE` | `true` | Enable `/sse` when `TRANSPORT=http` |
+| `MCP_STATELESS_HTTP` | `true` | Use stateless streamable HTTP sessions |
+| `MCP_HTTP_JSON_RESPONSE` | `true` | Prefer JSON responses on `/mcp` |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `MCP_DOMAIN` | — | Production domain (Traefik label) |
 | `ACME_EMAIL` | — | Let's Encrypt contact email |

@@ -3,21 +3,30 @@
 #   cp .env.example .env   # then set OPENLCA_PORT if non-default
 #   docker compose up --build
 #
-# MCP SSE endpoint: http://localhost:8000/sse
-# Health check:     http://localhost:8000/health
+# MCP endpoint:     http://localhost:8030/mcp
+# Legacy SSE:       http://localhost:8030/sse
+# Health check:     http://localhost:8030/health
+#
+# Exposing this publicly? A buffering reverse proxy/tunnel will hide the tools from
+# remote connectors — use docker-compose.gateway.yml instead. See docs/online-hosting.md.
 
 services:
   mcp-server:
     build: .
     ports:
-      - "${MCP_PORT:-8000}:8000"
+      # host:8030 → container:8000
+      - "8030:8000"
     environment:
-      TRANSPORT: sse
+      TRANSPORT: http
       # Reach openLCA running on the host machine
       OPENLCA_HOST: host.docker.internal
       OPENLCA_PORT: ${OPENLCA_PORT:-8080}
       MCP_HOST: "0.0.0.0"
       MCP_PORT: "8000"
+      MCP_ENABLE_STREAMABLE_HTTP: "true"
+      MCP_ENABLE_SSE: "true"
+      MCP_STATELESS_HTTP: "true"
+      MCP_HTTP_JSON_RESPONSE: "true"
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     env_file:
       - path: .env

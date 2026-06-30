@@ -7,3 +7,5 @@ dist/
 build/
 .pytest_cache/
 docker/letsencrypt/acme.json
+.deps_test/
+00_internal_plans/

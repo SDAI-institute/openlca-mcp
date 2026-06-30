@@ -13,12 +13,16 @@ This MCP server enables AI agents (like those in n8n workflows) to interact with
 
 ## Features
 
-- ✅ **15+ specialized LCA tools** for AI agents
+- ✅ **24 specialized LCA tools** for AI agents, covering the full openlca-ipc v0.4 surface
 - ✅ **Phase-organized** following ISO LCA standards
+- ✅ **Structured agent responses** — compact `ResultSummary`, reproducibility context, and
+  recoverable error envelopes (`error_code`, `recoverable`, `suggested_next_actions`)
+- ✅ **Read-only safe mode** (`OPENLCA_READ_ONLY=true`) to protect databases from writes
+- ✅ **Stable result handles** with a `result_id` registry for follow-up analysis
 - ✅ **n8n compatible** for workflow automation
-- ✅ **Error handling** and logging for production use
-- ✅ **Memory management** with result disposal
 - ✅ **Async support** for concurrent operations
+
+Built on **openlca-ipc ≥ 0.4.0** and its agent layer.
 
 ## Prerequisites
 
@@ -30,8 +34,8 @@ Before running the MCP server:
    - IPC server started (Tools → Developer Tools → IPC Server)
 
 2. **Python Environment**
-   - Python 3.10 or higher
-   - openlca-ipc library installed
+   - Python 3.11 or higher
+   - openlca-ipc ≥ 0.4.0 installed
 
 3. **For n8n Integration**
    - n8n instance running
@@ -65,12 +69,12 @@ Edit `.env` file:
 OPENLCA_PORT=8080          # Match your IPC server port
 OPENLCA_HOST=localhost
 
+# Safe mode: when true, all database writes are blocked (WRITE_BLOCKED).
+# Reads, searches, and calculations still work. Default: false.
+OPENLCA_READ_ONLY=false
+
 # Logging Configuration
 LOG_LEVEL=INFO             # DEBUG, INFO, WARNING, ERROR
-
-# MCP Server Configuration
-MCP_SERVER_NAME=openlca-lca-server
-MCP_SERVER_VERSION=0.1.0
 ```
 
 ### 3. Test the Server
@@ -89,44 +93,72 @@ MCP Server running...
 
 ## Available Tools
 
-### Phase 1: Goal & Scope Definition
+All 24 tools are advertised only if they have a working handler (enforced at startup and by
+a regression test), so there are no "dead" tools.
+
+### Connection & health
 
 | Tool | Purpose | Inputs |
 |------|---------|--------|
 | `test_connection` | Test openLCA connection | None |
-| `search_flows` | Find material flows | keywords, max_results, flow_type |
-| `search_processes` | Find processes | keywords, max_results |
-| `search_impact_methods` | Find LCIA methods | keywords |
-| `find_providers` | Find production processes | flow_id or flow_name |
+| `health_check` | Connection status + entity counts | count_entities? |
 
-### Phase 2: Life Cycle Inventory (LCI)
+### Phase 1: Goal & Scope Definition
 
 | Tool | Purpose | Inputs |
 |------|---------|--------|
-| `create_product_flow` | Create new product | name, description |
-| `create_process` | Create unit process | name, description, exchanges |
-| `create_product_system` | Build product system | process_id or process_name |
+| `search_flows` | Find material flows | keywords, max_results?, flow_type? |
+| `search_processes` | Find processes | keywords, max_results? |
+| `search_impact_methods` | Find LCIA methods (+ categories) | keywords |
+| `find_providers` | Find production processes for a flow | flow_id or flow_name |
+| `get_entity_by_name` | Exact-name lookup → EntitySummary | model_type, name |
+
+### Phase 2: Life Cycle Inventory (LCI) — writes
+
+| Tool | Purpose | Inputs |
+|------|---------|--------|
+| `create_product_flow` | Create a product flow | name, description? |
+| `create_process` | Create a unit process | name, description?, exchanges |
+| `create_product_system` | Build a product system | process_id or process_name |
+
+> Write tools return a `WRITE_BLOCKED` error when `OPENLCA_READ_ONLY=true`.
 
 ### Phase 3: Life Cycle Impact Assessment (LCIA)
 
 | Tool | Purpose | Inputs |
 |------|---------|--------|
-| `calculate_impacts` | Calculate environmental impacts | system_id, method_id, amount |
-| `get_inventory_results` | Get LCI results | result_id |
+| `calculate_impacts` | Calculate impacts → result_id + ResultSummary | system_id or system_name, method_id or method_keywords, amount? |
+| `get_inventory_results` | Full LCI (elementary flows) | result_id, direction? |
+| `get_total_requirements` | Scaled technology flows | result_id |
+| `get_normalized_impacts` | Normalized impacts | result_id |
+| `get_weighted_impacts` | Weighted impacts | result_id |
 
 ### Phase 4: Interpretation
 
 | Tool | Purpose | Inputs |
 |------|---------|--------|
-| `analyze_contributions` | Find impact hotspots | result_id, impact_category_id, n |
-| `run_monte_carlo` | Uncertainty analysis | system_id, method_id, iterations |
-| `export_results` | Export to CSV/JSON | data, filename, format |
+| `analyze_contributions` | Top process/flow contributors | result_id, impact_category_id, n?, contribution_type?, min_share? |
+| `get_contribution_tree` | Upstream hotspot tree | result_id, impact_category_id, max_depth?, min_share? |
+| `get_sankey` | Sankey graph data | result_id, impact_category_id, max_nodes?, min_share? |
+| `compare_systems` | Compare two systems on one method | system1_id, system2_id, method_id or method_keywords, amount? |
+| `run_monte_carlo` | Uncertainty analysis (stats) | system_id, method_id or method_keywords, iterations? |
+| `run_scenario_analysis` | Vary a parameter over values | system_id, method_id or method_keywords, parameter_name, values |
+| `export_results` | Export impacts/comparison to CSV/Excel | result_id or data, filepath, format?, kind? |
 
 ### Utilities
 
 | Tool | Purpose | Inputs |
 |------|---------|--------|
-| `dispose_result` | Free calculation memory | result_id |
+| `dispose_result` | Free one calculation result | result_id |
+| `dispose_all_results` | Free all tracked results | None |
+
+### The `result_id` workflow
+
+`calculate_impacts` runs the calculation, stores the live result, and returns a `result_id`
+plus a compact `ResultSummary` and any consistency warnings. Follow-up tools
+(`analyze_contributions`, `get_contribution_tree`, `get_inventory_results`, `get_sankey`,
+`get_normalized_impacts`, ...) take that `result_id` so the result is reused, not recomputed.
+Call `dispose_result` when finished (all results are also disposed on shutdown).
 
 ## Usage Examples
 
@@ -240,27 +272,30 @@ An AI agent would call tools in this sequence:
   "amount": 1.0
 }
 
-// Response:
+// Response (abridged):
 {
   "success": true,
-  "result_id": "result-456",
+  "result_id": "res_a1b2c3d4e5f6",
+  "summary": {
+    "result_id": "res_a1b2c3d4e5f6",
+    "top_impacts": [
+      {"category": "Global warming", "amount": 0.05, "unit": "kg CO2 eq"}
+    ],
+    "next_actions": ["inspect_contribution_tree", "compare_scenario", "export_report"],
+    "warnings": []
+  },
   "impacts": [
-    {
-      "name": "Global warming",
-      "amount": 0.05,
-      "unit": "kg CO2 eq",
-      "category": "gwp-id"
-    },
-    {
-      "name": "Acidification",
-      "amount": 0.0001,
-      "unit": "mol H+ eq",
-      "category": "acid-id"
-    }
+    {"name": "Global warming", "category": {"id": "gwp-id", "name": "Global warming"},
+     "category_id": "gwp-id", "amount": 0.05, "unit": "kg CO2 eq"}
   ],
-  "message": "IMPORTANT: Call dispose_result when done with this result_id"
+  "warnings": [],
+  "context": { "result_id": "res_a1b2c3d4e5f6", "timestamp": "...", "package_version": "0.4.0" },
+  "message": "Call dispose_result with this result_id when finished."
 }
 ```
+
+Feed `impacts[].category_id` into `analyze_contributions` / `get_contribution_tree` /
+`get_sankey` as `impact_category_id`.
 
 ## n8n Integration
 
@@ -274,14 +309,8 @@ An AI agent would call tools in this sequence:
    ```json
    {
      "name": "OpenLCA LCA Server",
-     "serverType": "stdio",
-     "command": "python",
-     "args": ["-m", "src.server"],
-     "cwd": "/path/to/mcp-server",
-     "env": {
-       "OPENLCA_PORT": "8080",
-       "LOG_LEVEL": "INFO"
-     }
+     "serverType": "sse",
+     "url": "http://localhost:8000/sse"
    }
    ```
 
@@ -348,30 +377,38 @@ See [docs/n8n-integration.md](docs/n8n-integration.md) for detailed setup.
 
 ## Error Handling
 
-The MCP server includes comprehensive error handling:
+Every response carries a `success` boolean. Failures additionally carry the structured
+agent fields so an AI agent can branch programmatically:
 
 ```json
 // Success response
 {
   "success": true,
-  "data": { ... }
+  "...": "tool-specific payload"
 }
 
 // Error response
 {
   "success": false,
-  "error": "Detailed error message"
+  "is_error": true,
+  "error_code": "IMPACT_METHOD_NOT_FOUND",
+  "message": "No impact method matched ['nope'].",
+  "recoverable": true,
+  "suggested_next_actions": ["search_impact_methods"]
 }
 ```
 
-Common errors:
+Error codes include `CONNECTION_FAILED`, `IMPACT_METHOD_NOT_FOUND`, `SYSTEM_NOT_FOUND`,
+`ENTITY_NOT_FOUND`, `CALCULATION_FAILED`, `WRITE_BLOCKED`, `UNKNOWN_TOOL`, and
+`INTERNAL_ERROR`.
 
-| Error | Cause | Solution |
-|-------|-------|----------|
-| "Could not connect to openLCA" | IPC server not running | Start IPC server in openLCA |
-| "Flow not found" | Material doesn't exist | Try different keywords or add to database |
-| "No provider found" | Elementary flow or missing process | Check flow type or add provider |
-| "Result X not found" | Result already disposed | Don't reuse disposed results |
+| Error code | Cause | Suggested recovery |
+|-----------|-------|--------------------|
+| `CONNECTION_FAILED` | IPC server not running | Start the IPC server in openLCA |
+| `ENTITY_NOT_FOUND` | Flow/process/result not found | Try different keywords; verify the id |
+| `SYSTEM_NOT_FOUND` | No matching product system | Search or create the product system |
+| `IMPACT_METHOD_NOT_FOUND` | No matching LCIA method | Use `search_impact_methods` |
+| `WRITE_BLOCKED` | Write attempted in read-only mode | Set `OPENLCA_READ_ONLY=false` |
 
 ## Best Practices for AI Agents
 
@@ -428,38 +465,25 @@ npm install -g @modelcontextprotocol/inspector
 mcp-inspector python -m src.server
 ```
 
-### Adding New Tools
+The server is split into focused modules; `src/server.py` stays the entry point:
 
-1. Define tool schema in `server.py`:
-```python
-TOOL_MY_NEW_TOOL = Tool(
-    name="my_new_tool",
-    description="What it does",
-    inputSchema={...}
-)
-```
+| Module | Responsibility |
+|--------|----------------|
+| `src/server.py` | Server setup, dispatch, stdio + streamable HTTP + legacy SSE transports, `main`/`run` |
+| `src/tool_defs.py` | `TOOLS` — all tool schema definitions |
+| `src/handlers.py` | Async handlers + `TOOL_HANDLERS` map |
+| `src/lca_client.py` | `get_client()` singleton, env config, read-only mode |
+| `src/result_store.py` | `result_id` registry for live results |
+| `src/responses.py` | Success/error envelopes + serializers |
 
-2. Implement handler:
-```python
-async def handle_my_new_tool(arguments: dict) -> List[TextContent]:
-    # Implementation
-    pass
-```
+To add a tool:
 
-3. Register in handlers map:
-```python
-TOOL_HANDLERS = {
-    "my_new_tool": handle_my_new_tool,
-    ...
-}
-```
+1. Register its schema in `src/tool_defs.py` (via the `_register(_tool(...))` helper).
+2. Implement `async def handle_<name>(arguments)` in `src/handlers.py` and add it to
+   `TOOL_HANDLERS`.
 
-4. Add to tool list:
-```python
-@server.list_tools()
-async def list_tools() -> list[Tool]:
-    return [..., TOOL_MY_NEW_TOOL]
-```
+`TOOLS` and `TOOL_HANDLERS` must stay in sync — the server raises at startup and a test
+fails otherwise, so an advertised tool can never lack a handler.
 
 ## Troubleshooting
 
@@ -468,8 +492,8 @@ async def list_tools() -> list[Tool]:
 **Problem:** Server fails to start
 
 **Check:**
-1. Is Python 3.10+ installed? `python --version`
-2. Are dependencies installed? `pip list | grep mcp`
+1. Is Python 3.11+ installed? `python --version`
+2. Are dependencies installed? `pip list | grep -E "mcp|openlca-ipc"`
 3. Is .env file configured? `cat .env`
 
 ### Can't Connect to openLCA
@@ -542,6 +566,39 @@ For production use:
 - Audit tool calls
 - Limit concurrent connections
 
+### Remote access & the optional auth token
+
+When you expose the server to a remote client (ChatGPT, Claude) through the
+streaming gateway (`docker-compose.gateway.yml`), authentication is **optional**:
+
+- **No token (simplest):** leave `MCP_AUTH_TOKEN` empty in `.env`. The gateway
+  runs open — anyone who can reach your tunnel/VPN can call it. Fine when the
+  tunnel itself already restricts access. Connect with the bare URL:
+  `https://<your-host>/mcp`
+- **With a token:** set `MCP_AUTH_TOKEN` to a long random secret. The gateway
+  then requires it on every request. Because ChatGPT's connector UI can't send
+  custom headers, pass it as a query parameter:
+  `https://<your-host>/mcp?api_key=<MCP_AUTH_TOKEN>`
+
+**Generate a token** (any one of these), then paste it into `MCP_AUTH_TOKEN` in `.env`:
+
+```bash
+# macOS / Linux (or Git Bash on Windows)
+openssl rand -hex 32
+
+# Windows PowerShell
+python -c "import secrets; print(secrets.token_hex(32))"
+```
+
+```env
+# .env  — leave empty to run the gateway open, or paste a generated secret here
+MCP_AUTH_TOKEN=
+```
+
+> The token is enforced **only** by the gateway (`gateway/Caddyfile`). It does
+> nothing in stdio mode or when you run the bare server without the gateway.
+> See [docs/online-hosting.md](docs/online-hosting.md) for the full remote setup.
+
 ## Contributing
 
 Contributions welcome! See main project [CONTRIBUTING.md](../CONTRIBUTING.md).
@@ -553,14 +610,14 @@ MIT License - See [LICENSE](../LICENSE) for details.
 ## Support
 
 - **Documentation**: [Full docs](docs/)
-- **Issues**: [GitHub Issues](https://github.com/dernestbank/openlca-ipc/issues)
+- **Issues**: [GitHub Issues](https://github.com/SDAI-institute/openlca-mcp/issues)
 - **Email**: dernestbanksch@gmail.com
 
 ## Acknowledgments
 
 Built on:
 - [MCP Protocol](https://modelcontextprotocol.io/) by Anthropic
-- [openlca-ipc](https://github.com/dernestbank/openlca-ipc)
+- [openlca-ipc](https://github.com/SDAI-institute/openlca-ipc)
 - [openLCA](https://www.openlca.org/) by GreenDelta
 
 ---

@@ -6,7 +6,7 @@ Get your OpenLCA MCP server running with AI agents in 10 minutes.
 
 Before starting, ensure you have:
 
-- [ ] Python 3.10+ installed (`python --version`)
+- [ ] Python 3.11+ installed (`python --version`)
 - [ ] openLCA desktop application installed
 - [ ] A database loaded in openLCA
 - [ ] IPC server running in openLCA (Tools → Developer Tools → IPC Server)
@@ -446,7 +446,7 @@ Using OpenLCA MCP tools:
 
 - **Documentation:** [Full docs](../README.md)
 - **Examples:** `examples/` folder
-- **Issues:** [GitHub Issues](https://github.com/dernestbank/openlca-ipc/issues)
+- **Issues:** [GitHub Issues](https://github.com/SDAI-institute/openlca-ipc/issues)
 - **Email:** dernestbanksch@gmail.com
 
 ## Checklist: Ready for Production?

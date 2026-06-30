@@ -45,7 +45,7 @@ This installs:
 - `mcp` - Model Context Protocol SDK
 - `pydantic` - Data validation
 - `python-dotenv` - Environment configuration
-- `openlca-ipc` - Parent library (from `../`)
+- `openlca-ipc` - Parent library 
 
 **Expected output:**
 ```

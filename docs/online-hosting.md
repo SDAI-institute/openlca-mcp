@@ -31,8 +31,8 @@ Public internet
 │  Static docs site           │  ← GitHub Pages, Netlify, Vercel, etc.
 │  (README, examples, guides) │
 │                             │
-│  Demo MCP SSE endpoint      │  ← docker-compose.prod.yml
-│  https://demo.yourdomain.com/sse │
+│  Demo MCP endpoint          │  ← docker-compose.prod.yml
+│  https://demo.yourdomain.com/mcp │
 │       │                     │
 │  openLCA (headless*)        │  ← bundled sample database
 │  IPC :8080 (localhost only) │
@@ -48,7 +48,7 @@ Public internet
 | Asset | Where | Notes |
 |-------|-------|-------|
 | Documentation | GitHub Pages / Netlify | Free, auto-deploys from `docs/` |
-| Demo SSE endpoint | VPS (docker-compose.prod.yml) | `https://demo.yourdomain.com/sse` |
+| Demo MCP endpoint | VPS (docker-compose.prod.yml) | `https://demo.yourdomain.com/mcp` |
 | Sample data | Bundled with openLCA on VPS | ELCD, ProBas, or a small custom DB |
 
 ### Quick setup
@@ -62,7 +62,7 @@ The existing `docs/` directory becomes your public docs site instantly.
 
 ```bash
 # On your VPS
-git clone https://github.com/dernestbank/openlca-mcp.git
+git clone https://github.com/SDAI-institute/openlca-mcp.git
 cd openlca-mcp
 
 # Configure
@@ -78,7 +78,7 @@ chmod 600 docker/letsencrypt/acme.json
 docker compose -f docker-compose.prod.yml up -d
 ```
 
-Users can now point any MCP client at `https://demo.yourdomain.com/sse` and run
+Users can now point modern MCP clients at `https://demo.yourdomain.com/mcp` and legacy SSE clients at `https://demo.yourdomain.com/sse`, then run
 queries against your sample data.
 
 ### Limitations
@@ -142,39 +142,61 @@ AI Client (Claude, Cursor, etc.)
 
 #### Path 1 — Tunnel shortcut (easiest, no custom server)
 
-Use an existing tunneling service to expose the user's local MCP SSE server.
+Use any tunneling service or reverse proxy to expose the user's local MCP server.
 The user runs both openLCA and the MCP server locally, then opens a tunnel.
 
 ```
-AI Client → https://abc123.trycloudflare.com/sse → Cloudflare tunnel → local :8000/sse → openLCA
+AI Client → https://<your-tunnel-host>/mcp → tunnel → gateway (no buffering) → local MCP → openLCA
 ```
 
-**User steps:**
+> ⚠️ **Critical gotcha — buffering proxies break MCP.** MCP's Streamable-HTTP/SSE
+> transports are long-lived streams. A **reverse proxy or tunnel that buffers
+> responses** never flushes the stream headers, so a remote connector (ChatGPT,
+> Claude) connects but shows **no tools** — it reports the server as "visible as
+> text, not an attached tool." A `curl` of `initialize`/`tools/list` still works
+> (those are single responses), which makes this easy to misdiagnose. Some hosted
+> CDN tunnels buffer by default; self-hosted proxies vary by config.
+>
+> **Fix:** put a reverse proxy that disables buffering between the frontend and the
+> server. This repo ships one — `docker-compose.gateway.yml` + `gateway/Caddyfile`
+> (`flush_interval -1`). Point your tunnel at the **gateway**, not the bare server.
+>
+> The decisive test (replace the host as appropriate):
+> ```bash
+> # Through your public host, the streaming endpoint must return headers IMMEDIATELY:
+> curl -sS -D - -o /dev/null --max-time 6 \
+>   -H "Accept: text/event-stream" https://<your-tunnel-host>/mcp/
+> # GOOD: HTTP/1.1 200 + content-type: text/event-stream  (then it holds open)
+> # BAD : HTTP 000 / times out with 0 bytes  →  the frontend is buffering
+> ```
+
+**User steps (with the streaming-safe gateway):**
 ```bash
-# 1. Start the local MCP server
-TRANSPORT=sse python -m src.server          # or: docker compose up
+# 1. Configure
+cp .env.example .env
+#   set OPENLCA_HOST=host.docker.internal  (openLCA runs on this machine)
+#   optionally set MCP_AUTH_TOKEN (openssl rand -hex 32) to require a secret
 
-# 2. Open a Cloudflare tunnel (no account needed for temporary tunnels)
-cloudflared tunnel --url http://localhost:8000
+# 2. Start the MCP server behind the no-buffering Caddy gateway
+docker compose -f docker-compose.gateway.yml up -d --build   # gateway → 127.0.0.1:8030
 
-# Cloudflare prints a URL like: https://abc123.trycloudflare.com
-# Use https://abc123.trycloudflare.com/sse in any MCP client
+# 3. Expose the GATEWAY (port 8030), NOT the bare server, with your tunnel of choice:
+ngrok http 8030                          # → https://xxxx.ngrok.io/mcp
+tailscale serve http://localhost:8030    # → https://hostname.tailnet.ts.net/mcp
+#   ...or any tunnel/reverse proxy pointed at http://127.0.0.1:8030
+
+# Use https://<your-host>/mcp in ChatGPT/Claude/OpenAI apps
+# Use https://<your-host>/sse for legacy SSE clients
+# If MCP_AUTH_TOKEN is set, append ?api_key=<token> to the URL.
 ```
 
-Or with ngrok:
-```bash
-ngrok http 8000
-# Use https://xxxx.ngrok.io/sse
-```
-
-Or with Tailscale (persistent, requires account):
-```bash
-# Share the MCP server on the Tailscale network
-tailscale serve http://localhost:8000    # accessible at https://hostname.tailnet.ts.net
-```
+If your tunnel/proxy already streams without buffering you can point it straight at
+the bare server (`:8000`) instead — but routing through the gateway is harmless,
+guarantees streaming, and adds optional auth, so it is the safe default.
 
 **Pros:** Zero custom backend code, works immediately  
-**Cons:** URL changes on restart (Cloudflare/ngrok free tier), user must manage the tunnel
+**Cons:** URL may change on restart (free tiers); user must manage the tunnel;
+a buffering frontend requires the no-buffering gateway above
 
 ---
 
@@ -246,14 +268,14 @@ For teams where everyone is on the same Tailscale network (or a WireGuard VPN),
 each user's local MCP server is addressable by stable Tailscale IP or hostname.
 
 ```
-AI Client → https://user-machine.tailnet.ts.net/sse → local MCP server → openLCA
+AI Client → https://user-machine.tailnet.ts.net/mcp → local MCP server → openLCA
 ```
 
 **Setup per user:**
 ```bash
 # Enable Tailscale HTTPS (requires Tailscale account)
 tailscale serve --https=443 http://localhost:8000
-# Server is now at: https://user-machine.tailnet.ts.net/sse
+# Server is now at: https://user-machine.tailnet.ts.net/mcp
 ```
 
 No relay server needed. Stable URLs. Works well for research groups and companies.
@@ -291,8 +313,11 @@ No relay server needed. Stable URLs. Works well for research groups and companie
 - **The MCP server has write access to openLCA.** `create_process`, `create_product_system`,
   and other write tools can modify the openLCA database. For public demos, disable or
   restrict write tools.
-- Add **Basic Auth or API key** middleware (Traefik labels in `docker-compose.prod.yml`)
-  before exposing any endpoint publicly.
+- Add **Basic Auth or API key** middleware before exposing any endpoint publicly:
+  the bundled gateway (`docker-compose.gateway.yml`) enforces a shared secret when
+  `MCP_AUTH_TOKEN` is set (accepted as `?api_key=` — the only form ChatGPT's connector
+  UI supports — or `Authorization: Bearer`); or use Traefik Basic Auth labels in
+  `docker-compose.prod.yml`.
 - For the relay path, issue **per-user API keys** and rotate them — never share a single
   key across users.
 - The local bridge only connects *outbound* (to your relay), so users do not need to open

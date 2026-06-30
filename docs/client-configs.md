@@ -2,12 +2,13 @@
 
 Copy-paste configs for connecting the openLCA MCP server to popular AI clients.
 
-Two connection modes:
+Three connection modes:
 
 | Mode | How it works | When to use |
 |------|-------------|-------------|
 | **stdio** | Client spawns the server process directly over stdin/stdout | Claude Desktop, Cursor, VS Code — running locally |
-| **SSE** | Client connects to an already-running HTTP server | Docker, n8n, remote/cloud deployments |
+| **Streamable HTTP** | Client connects to a single MCP endpoint such as `/mcp` | ChatGPT apps, OpenAI developer mode, modern remote MCP clients |
+| **SSE** | Client connects to the legacy `/sse` + `/messages/` transport | Older remote clients and backwards compatibility |
 
 ---
 
@@ -16,7 +17,7 @@ Two connection modes:
 ### For stdio mode — clone and install once
 
 ```bash
-git clone https://github.com/dernestbank/openlca-mcp.git
+git clone https://github.com/SDAI-institute/openlca-mcp.git
 cd openlca-mcp
 pip install -r requirements.txt
 ```
@@ -26,14 +27,14 @@ Note the **absolute path** to the cloned directory — you'll need it in every c
 - macOS/Linux: `/Users/you/openlca-mcp`
 - Windows: `C:\Users\you\openlca-mcp`
 
-### For SSE mode — server must be running first
+### For remote HTTP mode — server must be running first
 
 ```bash
 # local Docker
-docker compose up -d          # → http://localhost:8000/sse
+docker compose up -d          # → http://localhost:8000/mcp and /sse
 
 # or direct
-TRANSPORT=sse python -m src.server
+TRANSPORT=http python -m src.server
 ```
 
 See [DOCKER.md](../DOCKER.md) for full Docker and production setup.
@@ -67,7 +68,19 @@ openLCA → Tools → Developer Tools → IPC Server → Start (default port 808
 }
 ```
 
-### SSE (Docker or remote server)
+### Remote MCP (preferred for modern clients)
+
+```json
+{
+  "mcpServers": {
+    "openlca": {
+      "url": "http://localhost:8000/mcp"
+    }
+  }
+}
+```
+
+### SSE (legacy)
 
 ```json
 {
@@ -113,7 +126,7 @@ Or directly from GitHub:
     "openlca": {
       "command": "uvx",
       "args": [
-        "--from", "git+https://github.com/dernestbank/openlca-mcp",
+        "--from", "git+https://github.com/SDAI-institute/openlca-mcp",
         "openlca-mcp"
       ],
       "env": { "OPENLCA_PORT": "8080" }
@@ -234,11 +247,49 @@ cwd    = "/absolute/path/to/openlca-mcp"
 OPENLCA_PORT = "8080"
 ```
 
-### SSE
+### Remote MCP (preferred)
+
+```toml
+[mcp_servers.openlca]
+url = "http://localhost:8000/mcp"
+```
+
+### SSE (legacy)
 
 ```toml
 [mcp_servers.openlca]
 url = "http://localhost:8000/sse"
+```
+
+---
+
+## ChatGPT Developer Mode / Apps
+
+Use the public **`/mcp`** endpoint when creating an app in ChatGPT:
+
+```text
+https://mcp.yourdomain.com/mcp
+```
+
+Legacy `/sse` works for some MCP clients, but OpenAI’s current app connection flow expects the public MCP endpoint path.
+
+Two requirements people miss:
+
+1. **Enable Developer mode** (ChatGPT → Settings → Connectors → Advanced). Without it,
+   custom connectors are limited to Deep Research and only call `search`/`fetch` — the
+   24 openLCA tools never appear as callable actions in normal chat. After adding the
+   connector, start a **new chat** and toggle it on in the composer's tools menu.
+2. **Front a buffering proxy with the no-buffering gateway.** If the server sits behind
+   a reverse proxy or tunnel that **buffers responses**, the connector will connect but
+   show **no tools** (the stream never flushes). Deploy with `docker-compose.gateway.yml`
+   and point your frontend at the gateway.
+   See [online-hosting.md](online-hosting.md#path-1--tunnel-shortcut-easiest-no-custom-server).
+
+If you set `MCP_AUTH_TOKEN` on the gateway, register the URL with the secret as a query
+param (ChatGPT's UI can't send custom headers):
+
+```text
+https://mcp.yourdomain.com/mcp?api_key=<MCP_AUTH_TOKEN>
 ```
 
 ---
@@ -339,21 +390,21 @@ SSE variant:
 
 ## n8n (AI Agent / MCP Tool node)
 
-n8n typically runs in Docker. Use the Docker SSE server.
+n8n typically runs in Docker. Prefer `/mcp` if your MCP node supports streamable HTTP; otherwise use the legacy SSE URL.
 
 **If n8n and the MCP server are in the same Docker Compose stack:**
 ```
-http://mcp-server:8000/sse
+http://mcp-server:8000/mcp
 ```
 
 **If n8n runs in its own Docker network and the MCP server is on the host:**
 ```
-http://host.docker.internal:8000/sse
+http://host.docker.internal:8000/mcp
 ```
 
 **Remote (production):**
 ```
-https://mcp.yourdomain.com/sse
+https://mcp.yourdomain.com/mcp
 ```
 
 ---
@@ -364,7 +415,9 @@ https://mcp.yourdomain.com/sse
 |---------|-------------|-----|
 | "command not found: python" | Wrong Python name | Use `python3`, or full path: `/usr/bin/python3` |
 | Server starts but no tools | Wrong `cwd` | Use absolute path; test with `cd /path && python -m src.server` |
-| "Connection refused" on SSE URL | Server not running | Run `docker compose up` or `TRANSPORT=sse python -m src.server` |
+| "Connection refused" on MCP URL | Server not running | Run `docker compose up` or `TRANSPORT=http python -m src.server` |
 | "Could not connect to openLCA" | IPC server down | Open openLCA → Tools → Developer Tools → IPC Server → Start |
 | Port conflict on 8000 | Another process on 8000 | Set `MCP_PORT=8001` in `.env` and update the URL in config |
 | Windows: path with backslashes | JSON escape issue | Use forward slashes (`C:/Users/you/...`) or double backslashes |
+| Remote connector **connects but shows no tools** (ChatGPT/Claude) | A buffering reverse proxy/tunnel swallows the MCP stream; `curl` of `/mcp/` still works because single responses aren't buffered | Front the server with the no-buffering gateway: `docker compose -f docker-compose.gateway.yml up -d` and point your frontend at it. Verify: `curl -D- --max-time 6 -H "Accept: text/event-stream" https://host/mcp/` must return `200 + text/event-stream` immediately, not `HTTP 000`. See [online-hosting.md](online-hosting.md#path-1--tunnel-shortcut-easiest-no-custom-server) |
+| Remote connector tools missing in ChatGPT specifically | Developer mode off, or connector not enabled in this chat | Settings → Connectors → Advanced → enable Developer mode; start a new chat and toggle the connector on in the composer |

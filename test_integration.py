@@ -1,107 +1,98 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Test script to verify MCP server uses openlca-ipc library correctly.
+Smoke check that the MCP server is wired to the openlca-ipc library correctly.
+
+This is a standalone script (not collected by pytest). It verifies imports and
+that handlers call the expected library methods, without needing a running
+openLCA server. Run: python test_integration.py
 """
 
 import sys
-import os
+import inspect
 
-# Fix Windows encoding issues
-if sys.platform == 'win32':
-    sys.stdout.reconfigure(encoding='utf-8')
-
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8")
 
 print("Testing MCP Server Integration with openlca-ipc library\n")
 print("=" * 60)
 
-# Test 1: Import our library
+# Test 1: library import
 print("\n1. Testing library import...")
 try:
-    from openlca_ipc import OLCAClient
-    print("   ✓ Successfully imported OLCAClient from openlca-ipc")
-except ImportError as e:
-    print(f"   ✗ Failed to import: {e}")
+    from openlca_ipc import OLCAClient  # noqa: F401
+    import openlca_ipc
+
+    print(f"   OK imported OLCAClient (openlca-ipc {openlca_ipc.__version__})")
+    assert openlca_ipc.__version__ >= "0.4.0", "expected openlca-ipc >= 0.4.0"
+except Exception as e:
+    print(f"   FAIL import: {e}")
     sys.exit(1)
 
-# Test 2: Verify library modules
-print("\n2. Testing library modules...")
+# Test 2: agent layer present
+print("\n2. Testing agent layer...")
 try:
-    client = OLCAClient(port=8080)
-    print(f"   ✓ OLCAClient created (port: {client.port})")
-    print(f"   ✓ Has search module: {hasattr(client, 'search')}")
-    print(f"   ✓ Has data module: {hasattr(client, 'data')}")
-    print(f"   ✓ Has calculate module: {hasattr(client, 'calculate')}")
-    print(f"   ✓ Has results module: {hasattr(client, 'results')}")
-    print(f"   ✓ Has contributions module: {hasattr(client, 'contributions')}")
+    from openlca_ipc import (  # noqa: F401
+        ResultSummary,
+        EntitySummary,
+        CalculationContext,
+        health_check,
+        check_result_consistency,
+    )
+
+    print("   OK agent layer (ResultSummary, health_check, CalculationContext, ...)")
 except Exception as e:
-    print(f"   ✗ Failed to create client: {e}")
+    print(f"   FAIL agent layer: {e}")
+    sys.exit(1)
 
-# Test 3: Check MCP server imports
-print("\n3. Testing MCP server imports...")
+# Test 3: server modules import and tool/handler sets match
+print("\n3. Testing server module split...")
 try:
-    from src.server import get_client, OLCAClient as MCPOLCAClient
-    print("   ✓ MCP server imports OLCAClient")
-    print(f"   ✓ Same class? {OLCAClient is MCPOLCAClient}")
-except ImportError as e:
-    print(f"   ✗ Failed to import from MCP server: {e}")
+    from src.server import list_tools, call_tool  # noqa: F401
+    from src.lca_client import get_client  # noqa: F401
+    from src.tool_defs import TOOLS
+    from src.handlers import TOOL_HANDLERS
 
-# Test 4: Verify get_client uses our library
-print("\n4. Testing get_client() function...")
-try:
-    from src.server import get_client
-    # Note: This will try to connect to openLCA
-    # client = get_client()
-    # For now, just verify function exists
-    print(f"   ✓ get_client function exists: {callable(get_client)}")
-    print(f"   ✓ Returns OLCAClient: {get_client.__annotations__.get('return').__name__ == 'OLCAClient'}")
+    print(f"   OK server imports ({len(TOOLS)} tools)")
+    assert set(TOOLS) == set(TOOL_HANDLERS), "tool/handler set mismatch"
+    print("   OK every advertised tool has a handler")
 except Exception as e:
-    print(f"   ⚠ Note: {e}")
-    print("   (This is expected if openLCA is not running)")
+    print(f"   FAIL server import: {e}")
+    sys.exit(1)
 
-# Test 5: Verify tool handlers use library methods
-print("\n5. Testing tool handler integration...")
+# Test 4: handlers call the library
+print("\n4. Testing handler integration...")
 try:
-    import inspect
-    from src import server
+    from src import handlers
 
-    # Check handle_search_flows
-    source = inspect.getsource(server.handle_search_flows)
-    uses_library = "client.search.find_flows" in source
-    print(f"   ✓ handle_search_flows uses client.search.find_flows: {uses_library}")
-
-    # Check handle_calculate_impacts
-    source = inspect.getsource(server.handle_calculate_impacts)
-    uses_calc = "client.calculate.simple_calculation" in source
-    uses_results = "client.results.get_total_impacts" in source
-    print(f"   ✓ handle_calculate_impacts uses client.calculate: {uses_calc}")
-    print(f"   ✓ handle_calculate_impacts uses client.results: {uses_results}")
-
-    # Check handle_create_process
-    source = inspect.getsource(server.handle_create_process)
-    uses_data = "client.data.create_process" in source
-    uses_exchange = "client.data.create_exchange" in source
-    print(f"   ✓ handle_create_process uses client.data.create_process: {uses_data}")
-    print(f"   ✓ handle_create_process uses client.data.create_exchange: {uses_exchange}")
-
+    checks = {
+        "handle_search_flows": "client.search.find_flows",
+        "handle_calculate_impacts": "client.calculate.simple_calculation",
+        "handle_create_process": "client.data.create_process",
+        "handle_get_contribution_tree": "client.contributions.get_contribution_tree",
+        "handle_get_inventory_results": "client.results.get_inventory",
+        "handle_compare_systems": "client.calculate.compare_systems",
+    }
+    for fn_name, needle in checks.items():
+        source = inspect.getsource(getattr(handlers, fn_name))
+        assert needle in source, f"{fn_name} should call {needle}"
+        print(f"   OK {fn_name} -> {needle}")
 except Exception as e:
-    print(f"   ✗ Error inspecting handlers: {e}")
+    print(f"   FAIL handler inspection: {e}")
+    sys.exit(1)
 
-# Summary
 print("\n" + "=" * 60)
 print("INTEGRATION VERIFICATION COMPLETE")
 print("=" * 60)
-print("\nThe MCP server correctly uses the openlca-ipc library!")
-print("\nArchitecture:")
-print("  AI Agents (n8n)")
-print("      ↓")
-print("  MCP Server (server.py)")
-print("      ↓")
-print("  openlca-ipc Library ← YOU ARE HERE")
-print("      ↓")
-print("  openLCA IPC Server")
-print("      ↓")
-print("  openLCA Desktop")
-print("\n✓ All calculations use our high-level library!")
-print("✓ All tools map to library methods!")
-print("✓ AI agents get the full power of openlca-ipc!")
+print(
+    "\nArchitecture:\n"
+    "  AI Agents / MCP clients\n"
+    "      v\n"
+    "  MCP Server (src/server.py -> stdio / streamable HTTP / SSE)\n"
+    "      v\n"
+    "  Dispatch layer (tool_defs, handlers, responses)\n"
+    "      v\n"
+    "  openlca-ipc library (managers + agent layer)\n"
+    "      v\n"
+    "  openLCA IPC Server -> openLCA Desktop"
+)

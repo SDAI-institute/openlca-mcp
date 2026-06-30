@@ -1,23 +1,23 @@
 [project]
 name = "openlca-mcp-server"
-version = "0.1.0"
+version = "0.3.0"
 description = "MCP server for automating Life Cycle Assessment with openLCA"
 authors = [{name = "Ernest Boakye Danquah", email = "dernestbanksch@gmail.com"}]
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = {text = "MIT"}
 
 dependencies = [
-    "mcp>=0.9.0",
-    "openlca-ipc>=0.1.0",
+    "mcp>=1.28.0",
+    "openlca-ipc>=0.4.0",
     "pydantic>=2.0.0",
     "python-dotenv>=1.0.0",
 ]
 
 [project.urls]
-Homepage = "https://github.com/dernestbank/openlca-mcp"
-Repository = "https://github.com/dernestbank/openlca-mcp"
-Issues = "https://github.com/dernestbank/openlca-mcp/issues"
+Homepage = "https://github.com/SDAI-institute/openlca-mcp"
+Repository = "https://github.com/SDAI-institute/openlca-mcp"
+Issues = "https://github.com/SDAI-institute/openlca-mcp/issues"
 
 [project.scripts]
 openlca-mcp = "src.server:run"
@@ -26,6 +26,11 @@ openlca-mcp = "src.server:run"
 http = [
     "uvicorn>=0.23.0",
     "starlette>=0.27.0",
+]
+telemetry = [
+    "opentelemetry-sdk>=1.24.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.24.0",
+    "posthog>=3.0.0",
 ]
 dev = [
     "pytest>=7.0.0",
@@ -38,13 +43,20 @@ dev = [
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
+# Pin the distributed package explicitly. Without this, setuptools' flat-layout
+# auto-discovery sees both `src` and `tests` as top-level packages and aborts
+# the build ("Multiple top-level packages discovered"), which breaks
+# `pip install .`, wheel builds, and the `openlca-mcp` console script.
+[tool.setuptools]
+packages = ["src"]
+
 [tool.black]
 line-length = 100
-target-version = ['py310']
+target-version = ['py311']
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

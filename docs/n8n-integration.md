@@ -15,7 +15,7 @@ This guide shows you how to:
 ### Required
 
 - ✅ n8n instance (self-hosted or cloud)
-- ✅ Python 3.10+ with MCP server installed
+- ✅ Python 3.11+ with MCP server installed
 - ✅ openLCA desktop running with IPC server
 - ✅ MCP support in n8n (version with MCP integration)
 
@@ -717,6 +717,6 @@ See [examples/n8n-workflows/](../examples/n8n-workflows/) for:
 
 ## Support
 
-- **Issues**: [GitHub Issues](https://github.com/dernestbank/openlca-ipc/issues)
+- **Issues**: [GitHub Issues](https://github.com/SDAI-institute/openlca-ipc/issues)
 - **Discussions**: Tag with `mcp-server` or `n8n`
 - **Email**: dernestbanksch@gmail.com

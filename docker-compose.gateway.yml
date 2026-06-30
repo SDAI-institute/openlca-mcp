@@ -1,0 +1,68 @@
+# ============================================================================
+# Streaming-safe, optionally-authenticated gateway for the openLCA MCP server.
+#
+# Use this instead of docker-compose.yml when the server is fronted by a
+# BUFFERING reverse proxy or tunnel, which otherwise swallows the MCP stream so
+# remote connectors (ChatGPT, Claude) see no tools.
+# See docs/online-hosting.md and gateway/Caddyfile for the full explanation.
+#
+# This stack runs the MCP server (NOT published to the host) behind a Caddy
+# gateway that disables response buffering (flush_interval -1) and optionally
+# enforces a shared secret.
+#
+# Usage:
+#   cp .env.example .env
+#   #   set OPENLCA_HOST (host.docker.internal if openLCA runs on this machine)
+#   #   optionally set MCP_AUTH_TOKEN to require a secret
+#   docker compose -f docker-compose.gateway.yml up -d --build
+#
+#   The gateway listens on 127.0.0.1:${GATEWAY_PORT:-8030}. Point your public
+#   frontend (any reverse proxy, tunnel, or VPN) at that address.
+#
+# Endpoints (through your public domain):
+#   https://<your-domain>/mcp     Streamable HTTP  (ChatGPT / Claude / modern clients)
+#   https://<your-domain>/sse     legacy SSE
+#   If MCP_AUTH_TOKEN is set, append ?api_key=<MCP_AUTH_TOKEN> to the URL.
+# ============================================================================
+
+services:
+  mcp-server:
+    build: .
+    restart: unless-stopped
+    environment:
+      TRANSPORT: http
+      # Reach openLCA running on this same machine. Hardcoded (not ${OPENLCA_HOST})
+      # so a stray OPENLCA_HOST=localhost in .env can't break the container's
+      # host networking. For openLCA on another machine, set it to that host here.
+      OPENLCA_HOST: host.docker.internal
+      OPENLCA_PORT: ${OPENLCA_PORT:-8080}
+      MCP_HOST: "0.0.0.0"
+      MCP_PORT: "8000"
+      MCP_ENABLE_STREAMABLE_HTTP: "true"
+      MCP_ENABLE_SSE: "true"
+      MCP_STATELESS_HTTP: "true"
+      MCP_HTTP_JSON_RESPONSE: "true"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    env_file:
+      - path: .env
+        required: false
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # Only the gateway is reachable from outside; the server stays internal.
+    expose:
+      - "8000"
+
+  gateway:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - mcp-server
+    environment:
+      # Empty = no auth. Set a long random string to require ?api_key= / Bearer.
+      MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN:-}
+      MCP_UPSTREAM: mcp-server:8000
+    volumes:
+      - ./gateway/Caddyfile:/etc/caddy/Caddyfile:ro
+    ports:
+      # Bound to loopback: the only public path is your tunnel/VPN on this host.
+      - "127.0.0.1:${GATEWAY_PORT:-8030}:8080"

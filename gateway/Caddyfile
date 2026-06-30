@@ -1,0 +1,46 @@
+# ============================================================================
+# Streaming-safe reverse proxy for the openLCA MCP server.
+#
+# WHY THIS EXISTS
+#   MCP's Streamable-HTTP and SSE transports are long-lived streams. A buffering
+#   reverse proxy or tunnel holds the response and never flushes the headers until
+#   the body "completes", which for an idle stream never happens. The symptom: a
+#   remote connector (ChatGPT, Claude) reports the server as connected but exposes
+#   **no tools** ("visible as text, not as an attached tool"), because the stream
+#   it opened returns nothing. (Single request/response calls like initialize and
+#   tools/list aren't buffered, so a plain `curl` test can look fine — misleading.)
+#
+#   `flush_interval -1` disables response buffering, so each chunk the MCP server
+#   writes is forwarded immediately. This is the single setting that makes the
+#   server work behind a buffering frontend.
+#
+# OPTIONAL SHARED-SECRET AUTH
+#   ChatGPT's connector UI cannot add custom request headers, so the secret is
+#   accepted EITHER as:
+#       Authorization: Bearer <MCP_AUTH_TOKEN>      (header), or
+#       ?api_key=<MCP_AUTH_TOKEN>                    (query param)
+#   Auth is enforced ONLY when MCP_AUTH_TOKEN is set. Leave it empty to run open
+#   (e.g. when your tunnel/VPN already restricts access).
+#
+# Caddy listens on :8080 inside the container; the compose file publishes it.
+# ============================================================================
+{
+	auto_https off
+	admin off
+}
+
+:8080 {
+	# Authorized when no token is configured, OR the bearer/api_key matches.
+	@authorized expression `"{$MCP_AUTH_TOKEN}" == "" || {http.request.header.Authorization} == "Bearer {$MCP_AUTH_TOKEN}" || {http.request.uri.query.api_key} == "{$MCP_AUTH_TOKEN}"`
+
+	handle @authorized {
+		reverse_proxy {$MCP_UPSTREAM:mcp-server:8000} {
+			# Required: stream MCP responses byte-for-byte (no buffering).
+			flush_interval -1
+		}
+	}
+
+	handle {
+		respond "Unauthorized" 401
+	}
+}

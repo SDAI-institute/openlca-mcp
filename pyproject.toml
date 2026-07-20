@@ -1,6 +1,6 @@
 [project]
 name = "openlca-mcp-server"
-version = "0.3.0"
+version = "0.4.0"
 description = "MCP server for automating Life Cycle Assessment with openLCA"
 authors = [{name = "Ernest Boakye Danquah", email = "dernestbanksch@gmail.com"}]
 readme = "README.md"
@@ -9,6 +9,7 @@ license = {text = "MIT"}
 
 dependencies = [
     "mcp>=1.28.0",
+    "fastmcp>=3.4.0",
     "openlca-ipc>=0.4.0",
     "pydantic>=2.0.0",
     "python-dotenv>=1.0.0",
@@ -20,7 +21,7 @@ Repository = "https://github.com/SDAI-institute/openlca-mcp"
 Issues = "https://github.com/SDAI-institute/openlca-mcp/issues"
 
 [project.scripts]
-openlca-mcp = "src.server:run"
+openlca-mcp = "src.app:run"
 
 [project.optional-dependencies]
 http = [
@@ -35,6 +36,7 @@ telemetry = [
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.0.0",
     "black>=23.0.0",
     "ruff>=0.1.0",
 ]
@@ -61,3 +63,15 @@ target-version = "py311"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["src"]
+omit = ["*/tests/*", "*/__pycache__/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+]

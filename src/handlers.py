@@ -8,7 +8,7 @@ tool name -> handler and is the second half of the single-source-of-truth pair
 """
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import olca_schema as o
 from mcp.types import TextContent
@@ -276,6 +276,14 @@ async def handle_create_process(arguments: dict) -> List[TextContent]:
             provider = None
             if ex_data.get("provider_id"):
                 provider = o.Ref(id=ex_data["provider_id"])
+            unit_ref = (
+                o.Ref(id=ex_data["unit_id"]) if ex_data.get("unit_id") else None
+            )
+            fp_ref = (
+                o.Ref(id=ex_data["flow_property_id"])
+                if ex_data.get("flow_property_id")
+                else None
+            )
             exchanges.append(
                 client.data.create_exchange(
                     flow_ref,
@@ -283,18 +291,23 @@ async def handle_create_process(arguments: dict) -> List[TextContent]:
                     ex_data["is_input"],
                     ex_data.get("is_quantitative_reference", False),
                     provider,
+                    unit=unit_ref,
+                    flow_property=fp_ref,
+                    formula=ex_data.get("formula"),
                 )
             )
         process = client.data.create_process(
             arguments["name"], arguments.get("description", ""), exchanges
         )
+        warnings = client.data.check_mass_balance(process)
         return responses.success(
             {
                 "process": {
                     "id": process.id,
                     "name": process.name,
                     "description": process.description,
-                }
+                },
+                "warnings": warnings,
             }
         )
     except Exception as exc:
@@ -337,7 +350,12 @@ async def handle_create_product_system(arguments: dict) -> List[TextContent]:
         else:
             raise EntityNotFound(message="Provide either process_id or process_name.")
 
-        system = client.systems.create_product_system(process_ref)
+        system = client.systems.create_product_system(
+            process_ref,
+            default_providers=arguments.get("default_providers", "prefer"),
+            preferred_type=arguments.get("preferred_type", "LCI_RESULT"),
+            cutoff=arguments.get("cutoff"),
+        )
         if system is None:
             raise CalculationFailed(
                 message="Could not create product system (see server logs)."
@@ -478,6 +496,26 @@ async def handle_get_weighted_impacts(arguments: dict) -> List[TextContent]:
 # ---------------------------------------------------------------------------
 # Phase 4: Interpretation
 # ---------------------------------------------------------------------------
+
+async def handle_check_result_consistency(arguments: dict) -> List[TextContent]:
+    try:
+        stored = _stored_or_raise(arguments["result_id"])
+        warnings = check_result_consistency(
+            stored.result,
+            rel_tol=arguments.get("rel_tol", 1e-3),
+            abs_tol=arguments.get("abs_tol", 1e-12),
+        )
+        return responses.success(
+            {
+                "result_id": stored.result_id,
+                "consistent": not warnings,
+                "warnings": warnings,
+            }
+        )
+    except Exception as exc:
+        logger.error("check_result_consistency failed: %s", exc, exc_info=True)
+        return responses.error(exc)
+
 
 async def handle_analyze_contributions(arguments: dict) -> List[TextContent]:
     try:
@@ -685,6 +723,7 @@ TOOL_HANDLERS = {
     "get_total_requirements": handle_get_total_requirements,
     "get_normalized_impacts": handle_get_normalized_impacts,
     "get_weighted_impacts": handle_get_weighted_impacts,
+    "check_result_consistency": handle_check_result_consistency,
     "analyze_contributions": handle_analyze_contributions,
     "get_contribution_tree": handle_get_contribution_tree,
     "get_sankey": handle_get_sankey,

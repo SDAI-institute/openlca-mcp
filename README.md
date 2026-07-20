@@ -14,13 +14,18 @@ This MCP server enables AI agents (like those in n8n workflows) to interact with
 ## Features
 
 - ✅ **24 specialized LCA tools** for AI agents, covering the full openlca-ipc v0.4 surface
+- ✅ **Built on [FastMCP](https://gofastmcp.com)** — stdio + streamable-HTTP, typed tool schemas
+- ✅ **Guided prompts + resources** — LCA walkthroughs and pullable data
+  (`openlca://connections`, `openlca://impact-methods`, `openlca://product-systems`)
+- ✅ **Multi-instance** — named [connection profiles](#connections--multi-tenancy); one server
+  can target several openLCA instances, selected per call
+- ✅ **Auth / multi-tenancy** — optional API keys mapping callers to allowed instances
 - ✅ **Phase-organized** following ISO LCA standards
 - ✅ **Structured agent responses** — compact `ResultSummary`, reproducibility context, and
   recoverable error envelopes (`error_code`, `recoverable`, `suggested_next_actions`)
 - ✅ **Read-only safe mode** (`OPENLCA_READ_ONLY=true`) to protect databases from writes
 - ✅ **Stable result handles** with a `result_id` registry for follow-up analysis
-- ✅ **n8n compatible** for workflow automation
-- ✅ **Async support** for concurrent operations
+- ✅ **n8n / ChatGPT / Claude compatible** for workflow automation
 
 Built on **openlca-ipc ≥ 0.4.0** and its agent layer.
 
@@ -80,16 +85,39 @@ LOG_LEVEL=INFO             # DEBUG, INFO, WARNING, ERROR
 ### 3. Test the Server
 
 ```bash
-python -m src.server
+python -m src        # or: openlca-mcp   (installed console script)
 ```
 
-You should see:
+You should see the FastMCP banner, the loaded connection profiles, and a connection
+attempt to openLCA. (`python -m src` — not `python -m src.app`, which double-imports.)
+
+## Connections & multi-tenancy
+
+By default the server talks to **one** openLCA instance — the `default` profile, built
+from `OPENLCA_HOST` / `OPENLCA_PORT` / `OPENLCA_READ_ONLY` (your local desktop openLCA, so
+entities you create show up in the openLCA UI for verification).
+
+To target **several** instances from one server, define named **connection profiles** and
+pass `connection: "<id>"` to any tool (omit it for the default):
+
+```bash
+# inline JSON …
+OPENLCA_CONNECTIONS='[{"id":"remote","host":"100.107.240.54","port":8080,"kind":"remote","read_only":true}]'
+# … or a file (see config/connections.example.json)
+OPENLCA_CONNECTIONS_FILE=config/connections.json
 ```
-Starting OpenLCA MCP Server...
-OpenLCA port: 8080
-✓ Successfully connected to openLCA
-MCP Server running...
+
+**Auth** is off by default (open mode: anonymous callers, `default` profile only). Configure
+API keys to require a bearer token and gate which profiles each tenant may use (see
+`config/api_keys.example.json`):
+
+```bash
+OPENLCA_API_KEYS='{"sk_live_xxx":{"tenant_id":"acme","allowed_profiles":["default","remote"]}}'
+# or OPENLCA_API_KEYS_FILE=config/api_keys.json
 ```
+
+When auth is on, send `Authorization: Bearer <key>` (the streaming gateway also accepts
+`?api_key=<key>` for clients like ChatGPT that can't set headers).
 
 ## Available Tools
 
@@ -137,6 +165,7 @@ a regression test), so there are no "dead" tools.
 
 | Tool | Purpose | Inputs |
 |------|---------|--------|
+| `check_result_consistency` | Sanity-check a result (per-category contributions sum to the total) | result_id, rel_tol?, abs_tol? |
 | `analyze_contributions` | Top process/flow contributors | result_id, impact_category_id, n?, contribution_type?, min_share? |
 | `get_contribution_tree` | Upstream hotspot tree | result_id, impact_category_id, max_depth?, min_share? |
 | `get_sankey` | Sankey graph data | result_id, impact_category_id, max_nodes?, min_share? |
@@ -305,14 +334,16 @@ Feed `impacts[].category_id` into `analyze_contributions` / `get_contribution_tr
    - Install MCP nodes in your n8n instance
    - Configure MCP connection
 
-2. **Configure MCP Server Connection**
+2. **Configure MCP Server Connection** (streamable HTTP)
    ```json
    {
      "name": "OpenLCA LCA Server",
-     "serverType": "sse",
-     "url": "http://localhost:8000/sse"
+     "serverType": "http",
+     "url": "http://localhost:8000/mcp"
    }
    ```
+   > The server speaks **streamable HTTP** at `/mcp`. Behind the streaming gateway
+   > (`docker-compose.gateway.yml`) the public endpoint is `https://<host>/mcp`.
 
 3. **Create n8n Workflow**
 
@@ -450,7 +481,7 @@ If search returns empty:
 export LOG_LEVEL=DEBUG
 
 # Run server
-python -m src.server
+python -m src
 ```
 
 ### Testing Tools
@@ -462,7 +493,7 @@ Use MCP inspector or direct tool calls:
 npm install -g @modelcontextprotocol/inspector
 
 # Inspect server
-mcp-inspector python -m src.server
+mcp-inspector python -m src
 ```
 
 The server is split into focused modules; `src/server.py` stays the entry point:
@@ -525,7 +556,7 @@ View logs to debug issues:
 export LOG_LEVEL=DEBUG
 
 # Run server and view logs
-python -m src.server 2>&1 | tee server.log
+python -m src 2>&1 | tee server.log
 ```
 
 Log levels:

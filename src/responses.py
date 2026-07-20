@@ -33,16 +33,16 @@ def _dump(payload: Dict[str, Any]) -> List[TextContent]:
     return [TextContent(type="text", text=json.dumps(_json_safe(payload), indent=2))]
 
 
-def success(payload: Dict[str, Any]) -> List[TextContent]:
-    """Wrap a payload dict as a successful tool response."""
+def success_body(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Build the dict body of a successful tool response (JSON-safe)."""
     body = {"success": True}
     body.update(payload)
-    return _dump(body)
+    return _json_safe(body)
 
 
-def error(exc: Exception, *, error_code: str = "INTERNAL_ERROR") -> List[TextContent]:
+def error_body(exc: Exception, *, error_code: str = "INTERNAL_ERROR") -> Dict[str, Any]:
     """
-    Build an error envelope.
+    Build the dict body of an error envelope (JSON-safe).
 
     OLCAError instances contribute their structured fields; any other exception
     becomes a generic, non-recoverable envelope with the given error_code.
@@ -50,17 +50,26 @@ def error(exc: Exception, *, error_code: str = "INTERNAL_ERROR") -> List[TextCon
     if isinstance(exc, OLCAError):
         body = {"success": False}
         body.update(exc.to_dict())
-        return _dump(body)
+        return _json_safe(body)
 
-    body = {
+    return _json_safe({
         "success": False,
         "is_error": True,
         "error_code": error_code,
         "message": str(exc),
         "recoverable": False,
         "suggested_next_actions": [],
-    }
-    return _dump(body)
+    })
+
+
+def success(payload: Dict[str, Any]) -> List[TextContent]:
+    """Wrap a payload dict as a successful tool response (legacy TextContent)."""
+    return _dump(success_body(payload))
+
+
+def error(exc: Exception, *, error_code: str = "INTERNAL_ERROR") -> List[TextContent]:
+    """Build an error envelope as legacy TextContent (see :func:`error_body`)."""
+    return _dump(error_body(exc, error_code=error_code))
 
 
 def parse_json_content(contents: List[TextContent]) -> Dict[str, Any] | None:
@@ -93,13 +102,19 @@ def to_call_tool_result(contents: List[TextContent]) -> CallToolResult:
 # ---------------------------------------------------------------------------
 
 def ref_to_dict(ref: Any) -> Any:
-    """Compact an o.Ref-like object to {id, name, category}; pass dicts through."""
+    """Compact an o.Ref-like object to a JSON dict; pass dicts through.
+
+    Includes ``location`` and ``ref_unit`` when present: openLCA descriptors
+    carry these (e.g. a provider's ``location='RER'`` or a flow's reference
+    unit), and dropping them makes it impossible for an agent to disambiguate
+    otherwise identically named providers/flows by geography or unit.
+    """
     if ref is None:
         return None
     if isinstance(ref, dict):
         return ref
     out: Dict[str, Any] = {}
-    for attr in ("id", "name", "category"):
+    for attr in ("id", "name", "category", "location", "ref_unit"):
         value = getattr(ref, attr, None)
         if value is not None:
             out[attr] = value

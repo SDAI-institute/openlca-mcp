@@ -38,14 +38,19 @@ services:
       OPENLCA_PORT: ${OPENLCA_PORT:-8080}
       MCP_HOST: "0.0.0.0"
       MCP_PORT: "8000"
-      MCP_ENABLE_STREAMABLE_HTTP: "true"
-      MCP_ENABLE_SSE: "true"
-      MCP_STATELESS_HTTP: "true"
-      MCP_HTTP_JSON_RESPONSE: "true"
+      MCP_HTTP_PATH: "/mcp"
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Optional multi-instance / multi-tenant config (see config/*.example.json).
+      # Files are read from the mounted ./config dir below; leave unset for the
+      # single local-default, open-mode setup.
+      # OPENLCA_CONNECTIONS_FILE: /app/config/connections.json
+      # OPENLCA_API_KEYS_FILE: /app/config/api_keys.json
     env_file:
       - path: .env
         required: false
+    volumes:
+      # Mount connection/api-key JSON (if present) read-only into the container.
+      - ./config:/app/config:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     # Only the gateway is reachable from outside; the server stays internal.

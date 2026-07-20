@@ -8,4 +8,8 @@ build/
 .pytest_cache/
 docker/letsencrypt/acme.json
 .deps_test/
+.venv-spike/
 00_internal_plans/
+# Local connection registry / API keys — never commit secrets
+config/connections.json
+config/api_keys.json

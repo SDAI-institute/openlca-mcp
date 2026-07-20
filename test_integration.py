@@ -45,19 +45,26 @@ except Exception as e:
     print(f"   FAIL agent layer: {e}")
     sys.exit(1)
 
-# Test 3: server modules import and tool/handler sets match
-print("\n3. Testing server module split...")
+# Test 3: FastMCP app imports and registers tools, prompts, and resources
+print("\n3. Testing FastMCP app registration...")
 try:
-    from src.server import list_tools, call_tool  # noqa: F401
+    import asyncio
+
+    from src.app import mcp
     from src.lca_client import get_client  # noqa: F401
-    from src.tool_defs import TOOLS
     from src.handlers import TOOL_HANDLERS
 
-    print(f"   OK server imports ({len(TOOLS)} tools)")
-    assert set(TOOLS) == set(TOOL_HANDLERS), "tool/handler set mismatch"
-    print("   OK every advertised tool has a handler")
+    tools = asyncio.run(mcp.list_tools())
+    prompts = asyncio.run(mcp.list_prompts())
+    resources = asyncio.run(mcp.list_resources())
+    print(f"   OK app registers {len(tools)} tools, {len(prompts)} prompts, "
+          f"{len(resources)} resources")
+    # Every tool still maps to a delegated handler (the bridge target).
+    tool_names = {t.name for t in tools}
+    assert tool_names == set(TOOL_HANDLERS), "tool/handler set mismatch"
+    print("   OK every tool maps to a handler")
 except Exception as e:
-    print(f"   FAIL server import: {e}")
+    print(f"   FAIL app import: {e}")
     sys.exit(1)
 
 # Test 4: handlers call the library
@@ -88,9 +95,11 @@ print(
     "\nArchitecture:\n"
     "  AI Agents / MCP clients\n"
     "      v\n"
-    "  MCP Server (src/server.py -> stdio / streamable HTTP / SSE)\n"
+    "  FastMCP server (src/app.py -> stdio / streamable HTTP)\n"
     "      v\n"
-    "  Dispatch layer (tool_defs, handlers, responses)\n"
+    "  Tools (src/tools/) -> bridge (call_handler) -> handlers + responses\n"
+    "      v\n"
+    "  Connections (profiles) + Auth (API keys)\n"
     "      v\n"
     "  openlca-ipc library (managers + agent layer)\n"
     "      v\n"

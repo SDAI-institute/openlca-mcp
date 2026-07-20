@@ -1,3 +1,3 @@
 """OpenLCA MCP Server for AI Agent Automation."""
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

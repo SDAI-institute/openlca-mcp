@@ -1,0 +1,20 @@
+{
+  "connections": [
+    {
+      "id": "default",
+      "host": "host.docker.internal",
+      "port": 8080,
+      "read_only": false,
+      "kind": "local",
+      "label": "Local desktop openLCA (UI-backed, human-verifiable)"
+    },
+    {
+      "id": "remote-headless",
+      "host": "100.107.240.54",
+      "port": 8080,
+      "read_only": true,
+      "kind": "remote",
+      "label": "Remote headless openLCA over Tailscale (automation only)"
+    }
+  ]
+}

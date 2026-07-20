@@ -63,6 +63,88 @@ async def test_get_entity_by_name_found_and_missing(patch_client):
 
 
 # ---------------------------------------------------------------------------
+# Phase 2: Life Cycle Inventory (writes)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_create_process_returns_no_warnings_when_balanced(patch_client):
+    patch_client.data.create_exchange.side_effect = lambda *a, **k: MagicMock(name="Exchange")
+    process = o.Process(id="p1", name="Balanced process", description="")
+    patch_client.data.create_process.return_value = process
+    patch_client.data.check_mass_balance.return_value = []
+
+    body = payload(
+        await handlers.handle_create_process(
+            {
+                "name": "Balanced process",
+                "exchanges": [
+                    {"flow_id": "f-out", "amount": 0.065, "is_input": False,
+                     "is_quantitative_reference": True},
+                    {"flow_id": "f-in", "amount": 0.065, "is_input": True},
+                ],
+            }
+        )
+    )
+    assert body["success"] is True
+    assert body["process"]["id"] == "p1"
+    assert body["warnings"] == []
+    patch_client.data.check_mass_balance.assert_called_once_with(process)
+
+
+@pytest.mark.asyncio
+async def test_create_process_surfaces_mass_balance_warning(patch_client):
+    """The imbalance the tutorial warns about (Fig 24/25) must be surfaced to
+    the caller, not silently created."""
+    patch_client.data.create_exchange.side_effect = lambda *a, **k: MagicMock(name="Exchange")
+    process = o.Process(id="p2", name="Unbalanced process", description="")
+    patch_client.data.create_process.return_value = process
+    patch_client.data.check_mass_balance.return_value = [
+        "Mass balance violated for process 'Unbalanced process': inputs sum to "
+        "0.065 kg, outputs sum to 1 kg (1438.5% relative difference)."
+    ]
+
+    body = payload(
+        await handlers.handle_create_process(
+            {
+                "name": "Unbalanced process",
+                "exchanges": [
+                    {"flow_id": "f-out", "amount": 1.0, "is_input": False,
+                     "is_quantitative_reference": True},
+                    {"flow_id": "f-in", "amount": 0.065, "is_input": True},
+                ],
+            }
+        )
+    )
+    assert body["success"] is True  # still created — this is a warning, not a block
+    assert len(body["warnings"]) == 1
+    assert "Mass balance violated" in body["warnings"][0]
+
+
+@pytest.mark.asyncio
+async def test_create_process_passes_formula_and_unit_overrides(patch_client):
+    """The exchange dict's formula/unit_id/flow_property_id are threaded
+    through to create_exchange (F1/F7 pass-through)."""
+    patch_client.data.create_exchange.side_effect = lambda *a, **k: MagicMock(name="Exchange")
+    patch_client.data.create_process.return_value = o.Process(id="p3", name="X", description="")
+    patch_client.data.check_mass_balance.return_value = []
+
+    await handlers.handle_create_process(
+        {
+            "name": "X",
+            "exchanges": [
+                {"flow_id": "f-transport", "amount": 0.0325, "is_input": True,
+                 "formula": "0.065*500/1000", "unit_id": "u-tkm",
+                 "flow_property_id": "fp-goods"},
+            ],
+        }
+    )
+    _, kwargs = patch_client.data.create_exchange.call_args
+    assert kwargs["formula"] == "0.065*500/1000"
+    assert kwargs["unit"].id == "u-tkm"
+    assert kwargs["flow_property"].id == "fp-goods"
+
+
+# ---------------------------------------------------------------------------
 # Calculate
 # ---------------------------------------------------------------------------
 
@@ -111,6 +193,42 @@ async def test_calculate_impacts_method_not_found(patch_client):
 # ---------------------------------------------------------------------------
 # Interpretation (operate on a stored result)
 # ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_check_result_consistency_clean(patch_client, sample_impacts, monkeypatch):
+    stored = store.add(MagicMock(), impacts=sample_impacts)
+    monkeypatch.setattr(handlers, "check_result_consistency", lambda r, rel_tol, abs_tol: [])
+    body = payload(
+        await handlers.handle_check_result_consistency({"result_id": stored.result_id})
+    )
+    assert body["success"] is True
+    assert body["consistent"] is True
+    assert body["warnings"] == []
+
+
+@pytest.mark.asyncio
+async def test_check_result_consistency_reports_warnings(patch_client, sample_impacts, monkeypatch):
+    stored = store.add(MagicMock(), impacts=sample_impacts)
+    monkeypatch.setattr(
+        handlers, "check_result_consistency",
+        lambda r, rel_tol, abs_tol: ["Climate change: contributions sum to 1.5, total is 2.0"],
+    )
+    body = payload(
+        await handlers.handle_check_result_consistency({"result_id": stored.result_id})
+    )
+    assert body["success"] is True
+    assert body["consistent"] is False
+    assert len(body["warnings"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_check_result_consistency_unknown_result_id(patch_client):
+    body = payload(
+        await handlers.handle_check_result_consistency({"result_id": "res_missing"})
+    )
+    assert body["success"] is False
+    assert body["error_code"] == "ENTITY_NOT_FOUND"
+
 
 @pytest.mark.asyncio
 async def test_analyze_contributions(patch_client, sample_impacts):

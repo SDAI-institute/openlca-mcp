@@ -1,4 +1,5 @@
 mcp>=1.28.0
+fastmcp>=3.4.0
 pydantic>=2.0.0
 python-dotenv>=1.0.0
 openlca-ipc>=0.4.0

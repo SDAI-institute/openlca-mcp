@@ -5,6 +5,44 @@ All notable changes to **openlca-mcp** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-06-30
+
+Migrated the server onto **FastMCP** and added multi-instance + multi-tenant support,
+prompts, and resources. All 24 tools preserved (logic + tests reused via a bridge).
+
+### Added
+- **Connection profiles** (`src/connections.py`). A registry of named openLCA instances;
+  `default` is synthesized from `OPENLCA_HOST/PORT/READ_ONLY` (your local UI-backed
+  desktop openLCA). Extra profiles via `OPENLCA_CONNECTIONS[_FILE]`. Every tool accepts
+  an optional `connection` argument; clients are cached per profile.
+- **API-key auth / multi-tenancy** (`src/auth.py`). `OPENLCA_API_KEYS[_FILE]` map keys →
+  tenant + allowed profiles. Unset ⇒ open mode (anonymous, default profile only). Bearer
+  token verified app-side; the Caddy gateway still accepts `?api_key=`.
+- **Prompts** (`src/prompts.py`): `lca_calculation_walkthrough`, `interpret_impact_results`,
+  `build_product_system_guide`.
+- **Resources** (`src/resources.py`): `openlca://connections`, `openlca://impact-methods`,
+  `openlca://product-systems`, `openlca://iso-phases-guide`.
+- **Inline per-tool schemas** — tools in `src/tools/` declare typed signatures (input
+  schema) + co-located strict `output_schema`.
+- CI (`.github/workflows/ci.yml`: ruff + pytest + coverage) and coverage config.
+
+### Changed
+- Server runs on **FastMCP** (`src/app.py`); entrypoint is `python -m src` /
+  `openlca-mcp` (`src.app:run`). Telemetry is a FastMCP middleware; auth a `TokenVerifier`.
+- Blocking openLCA IPC now runs in a worker thread (`anyio.to_thread`) so a slow
+  instance can't stall the event loop.
+- HTTP path is `/mcp` (no trailing slash) — point connectors/tunnels at `/mcp`.
+
+### Fixed
+- Packaging: explicit `[tool.setuptools] packages=["src"]` so wheels / `pip install` /
+  the console script build (flat-layout auto-discovery used to abort).
+- Per-call IPC timeout (`OPENLCA_TIMEOUT`, default 15s) so an unreachable openLCA fails
+  fast with `CONNECTION_FAILED` instead of hanging into a proxy 502.
+
+### Deprecated
+- The low-level `src/server.py` + `src/tool_defs.py` remain as a fallback but are no
+  longer the entrypoint; `src/handlers.py` is still used (the FastMCP tools delegate to it).
+
 ## [0.2.0] - 2026-06-25
 
 Modernized the server onto **openlca-ipc v0.4.0** and its agent layer.

@@ -1,0 +1,11 @@
+{
+  "sk_live_REPLACE_ME": {
+    "tenant_id": "acme",
+    "allowed_profiles": ["default", "remote-headless"],
+    "default_profile": "default"
+  },
+  "sk_admin_REPLACE_ME": {
+    "tenant_id": "admin",
+    "allowed_profiles": "*"
+  }
+}

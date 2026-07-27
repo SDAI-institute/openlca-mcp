@@ -7,11 +7,33 @@ lets you inspect/verify the new entity in the openLCA UI.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Annotated, Literal, Optional
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from .. import handlers
 from ..app import call_handler, write_tool
 from ..schemas import arr
+
+
+class ProcessExchange(BaseModel):
+    """Validated exchange payload for process creation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    flow_id: str
+    amount: float
+    is_input: bool
+    is_quantitative_reference: bool = False
+    provider_id: Optional[str] = None
+    formula: Optional[str] = None
+    unit_id: Optional[str] = None
+    flow_property_id: Optional[str] = None
+
+
+ProviderPolicy = Literal["prefer", "only", "ignore"]
+PreferredProcessType = Literal["LCI_RESULT", "UNIT_PROCESS"]
+Cutoff = Annotated[float, Field(ge=0.0, le=1.0)]
 
 
 @write_tool(
@@ -40,16 +62,24 @@ async def create_product_flow(
     "this automatically). WRITE: blocked on read-only connections.",
     {
         "process": {"type": "object", "description": "The newly created unit process."},
-        "warnings": arr({"type": "string", "description": "Mass-balance warnings, if any; empty if balanced."}),
+        "warnings": arr(
+            {"type": "string", "description": "Mass-balance warnings, if any; empty if balanced."}
+        ),
     },
 )
 async def create_process(
-    name: str, exchanges: list[dict[str, Any]], description: str = "",
+    name: str,
+    exchanges: list[ProcessExchange],
+    description: str = "",
     connection: Optional[str] = None,
 ) -> dict:
     return await call_handler(
         handlers.handle_create_process,
-        {"name": name, "description": description, "exchanges": exchanges},
+        {
+            "name": name,
+            "description": description,
+            "exchanges": [exchange.model_dump(exclude_none=True) for exchange in exchanges],
+        },
         connection,
     )
 
@@ -64,15 +94,20 @@ async def create_process(
     {"product_system": {"type": "object", "description": "The created product system."}},
 )
 async def create_product_system(
-    process_id: Optional[str] = None, process_name: Optional[str] = None,
-    cutoff: Optional[float] = None, default_providers: str = "prefer",
-    preferred_type: str = "LCI_RESULT", connection: Optional[str] = None,
+    process_id: Optional[str] = None,
+    process_name: Optional[str] = None,
+    cutoff: Optional[Cutoff] = None,
+    default_providers: ProviderPolicy = "prefer",
+    preferred_type: PreferredProcessType = "LCI_RESULT",
+    connection: Optional[str] = None,
 ) -> dict:
     return await call_handler(
         handlers.handle_create_product_system,
         {
-            "process_id": process_id, "process_name": process_name,
-            "cutoff": cutoff, "default_providers": default_providers,
+            "process_id": process_id,
+            "process_name": process_name,
+            "cutoff": cutoff,
+            "default_providers": default_providers,
             "preferred_type": preferred_type,
         },
         connection,

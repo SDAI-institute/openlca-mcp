@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Literal, Optional
 
 from .. import handlers
 from ..app import call_handler, ro_tool
 from ..schemas import REF, arr
+
+FlowType = Literal["PRODUCT_FLOW", "ELEMENTARY_FLOW", "WASTE_FLOW"]
+ModelType = Literal["Flow", "Process", "ImpactMethod", "ProductSystem", "FlowProperty", "Unit"]
 
 _MODEL_TYPES = ["Flow", "Process", "ImpactMethod", "ProductSystem", "FlowProperty", "Unit"]
 
@@ -19,7 +22,9 @@ _MODEL_TYPES = ["Flow", "Process", "ImpactMethod", "ProductSystem", "FlowPropert
     {"count": {"type": "integer"}, "flows": arr(REF)},
 )
 async def search_flows(
-    keywords: list[str], max_results: int = 10, flow_type: Optional[str] = None,
+    keywords: list[str],
+    max_results: int = 10,
+    flow_type: Optional[FlowType] = None,
     connection: Optional[str] = None,
 ) -> dict:
     return await call_handler(
@@ -36,7 +41,9 @@ async def search_flows(
     {"count": {"type": "integer"}, "processes": arr(REF)},
 )
 async def search_processes(
-    keywords: list[str], max_results: int = 10, connection: Optional[str] = None,
+    keywords: list[str],
+    max_results: int = 10,
+    connection: Optional[str] = None,
 ) -> dict:
     return await call_handler(
         handlers.handle_search_processes,
@@ -64,7 +71,8 @@ async def search_impact_methods(keywords: list[str], connection: Optional[str] =
     {"count": {"type": "integer"}, "providers": arr(REF)},
 )
 async def find_providers(
-    flow_id: Optional[str] = None, flow_name: Optional[str] = None,
+    flow_id: Optional[str] = None,
+    flow_name: Optional[str] = None,
     connection: Optional[str] = None,
 ) -> dict:
     return await call_handler(
@@ -78,7 +86,11 @@ async def find_providers(
     "when you know the exact name. Returns a compact {id, name, type, category} summary.",
     {"entity": {"type": "object", "description": "Compact summary of the matched entity."}},
 )
-async def get_entity_by_name(model_type: str, name: str, connection: Optional[str] = None) -> dict:
+async def get_entity_by_name(
+    model_type: ModelType,
+    name: str,
+    connection: Optional[str] = None,
+) -> dict:
     return await call_handler(
         handlers.handle_get_entity_by_name, {"model_type": model_type, "name": name}, connection
     )

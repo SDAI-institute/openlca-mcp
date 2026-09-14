@@ -1,64 +1,52 @@
-# Client Configuration
+# openLCA MCP Client Configuration
 
-Copy-paste configs for connecting the openLCA MCP server to popular AI clients.
+The current v0.4.1 FastMCP entry point supports two primary connection modes:
 
-Three connection modes:
+| Mode | Endpoint/process | Use |
+|---|---|---|
+| **stdio** | client launches `python -m src` | Local desktop/developer clients |
+| **Streamable HTTP** | `https://host/mcp` | Remote/web/sandboxed agent clients, services, and workflows |
 
-| Mode | How it works | When to use |
-|------|-------------|-------------|
-| **stdio** | Client spawns the server process directly over stdin/stdout | Claude Desktop, Cursor, VS Code — running locally |
-| **Streamable HTTP** | Client connects to a single MCP endpoint such as `/mcp` | ChatGPT apps, OpenAI developer mode, modern remote MCP clients |
-| **SSE** | Client connects to the legacy `/sse` + `/messages/` transport | Older remote clients and backwards compatibility |
+The examples below assume the repository is cloned and installed, and openLCA Desktop is running with its IPC server enabled.
 
----
-
-## Prerequisites
-
-### For stdio mode — clone and install once
+## Local installation
 
 ```bash
 git clone https://github.com/SDAI-institute/openlca-mcp.git
 cd openlca-mcp
-pip install -r requirements.txt
+pip install -e .
 ```
 
-Note the **absolute path** to the cloned directory — you'll need it in every config below.
-
-- macOS/Linux: `/Users/you/openlca-mcp`
-- Windows: `C:\Users\you\openlca-mcp`
-
-### For remote HTTP mode — server must be running first
+Test the server directly:
 
 ```bash
-# local Docker
-docker compose up -d          # → http://localhost:8000/mcp and /sse
-
-# or direct
-TRANSPORT=http python -m src.server
+python -m src
 ```
 
-See [DOCKER.md](../DOCKER.md) for full Docker and production setup.
+## stdio configuration pattern
 
-### openLCA must be running with IPC server enabled
+Clients that can launch local MCP processes use the same basic configuration:
 
-openLCA → Tools → Developer Tools → IPC Server → Start (default port 8080)
+```json
+{
+  "command": "python",
+  "args": ["-m", "src"],
+  "cwd": "/absolute/path/to/openlca-mcp",
+  "env": {
+    "OPENLCA_HOST": "localhost",
+    "OPENLCA_PORT": "8080"
+  }
+}
+```
 
----
-
-## Claude Desktop
-
-**Config file:**
-- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
-- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
-
-### stdio (local — recommended)
+### Claude Desktop / Cursor-style configuration
 
 ```json
 {
   "mcpServers": {
     "openlca": {
       "command": "python",
-      "args": ["-m", "src.server"],
+      "args": ["-m", "src"],
       "cwd": "/absolute/path/to/openlca-mcp",
       "env": {
         "OPENLCA_PORT": "8080"
@@ -68,120 +56,7 @@ openLCA → Tools → Developer Tools → IPC Server → Start (default port 808
 }
 ```
 
-### Remote MCP (preferred for modern clients)
-
-```json
-{
-  "mcpServers": {
-    "openlca": {
-      "url": "http://localhost:8000/mcp"
-    }
-  }
-}
-```
-
-### SSE (legacy)
-
-```json
-{
-  "mcpServers": {
-    "openlca": {
-      "url": "http://localhost:8000/sse"
-    }
-  }
-}
-```
-
-```json
-{
-  "mcpServers": {
-    "openlca": {
-      "url": "https://mcp.yourdomain.com/sse"
-    }
-  }
-}
-```
-
-Restart Claude Desktop after saving.
-
-### uvx one-liner (no clone needed, once published to PyPI)
-
-```json
-{
-  "mcpServers": {
-    "openlca": {
-      "command": "uvx",
-      "args": ["openlca-mcp-server"],
-      "env": { "OPENLCA_PORT": "8080" }
-    }
-  }
-}
-```
-
-Or directly from GitHub:
-
-```json
-{
-  "mcpServers": {
-    "openlca": {
-      "command": "uvx",
-      "args": [
-        "--from", "git+https://github.com/SDAI-institute/openlca-mcp",
-        "openlca-mcp"
-      ],
-      "env": { "OPENLCA_PORT": "8080" }
-    }
-  }
-}
-```
-
----
-
-## Cursor
-
-**Config file:**
-- Global: `~/.cursor/mcp.json`
-- Project-scoped: `.cursor/mcp.json` in the project root
-
-### stdio
-
-```json
-{
-  "mcpServers": {
-    "openlca": {
-      "command": "python",
-      "args": ["-m", "src.server"],
-      "cwd": "/absolute/path/to/openlca-mcp",
-      "env": {
-        "OPENLCA_PORT": "8080"
-      }
-    }
-  }
-}
-```
-
-### SSE
-
-```json
-{
-  "mcpServers": {
-    "openlca": {
-      "url": "http://localhost:8000/sse",
-      "type": "sse"
-    }
-  }
-}
-```
-
----
-
-## VS Code (GitHub Copilot agent mode)
-
-VS Code 1.99+ with GitHub Copilot supports MCP servers in agent mode.
-
-**Config file:** `.vscode/mcp.json` (project) or user `settings.json`
-
-### stdio
+### VS Code-style configuration
 
 ```json
 {
@@ -189,7 +64,7 @@ VS Code 1.99+ with GitHub Copilot supports MCP servers in agent mode.
     "openlca": {
       "type": "stdio",
       "command": "python",
-      "args": ["-m", "src.server"],
+      "args": ["-m", "src"],
       "cwd": "/absolute/path/to/openlca-mcp",
       "env": {
         "OPENLCA_PORT": "8080"
@@ -199,225 +74,79 @@ VS Code 1.99+ with GitHub Copilot supports MCP servers in agent mode.
 }
 ```
 
-Windows path example:
-```json
-{
-  "servers": {
-    "openlca": {
-      "type": "stdio",
-      "command": "python",
-      "args": ["-m", "src.server"],
-      "cwd": "C:\\Users\\you\\openlca-mcp",
-      "env": {
-        "OPENLCA_PORT": "8080"
-      }
-    }
-  }
-}
-```
-
-### SSE
-
-```json
-{
-  "servers": {
-    "openlca": {
-      "type": "sse",
-      "url": "http://localhost:8000/sse"
-    }
-  }
-}
-```
-
----
-
-## OpenAI Codex CLI
-
-**Config file:** `~/.codex/config.toml`
-
-### stdio
+### OpenAI Codex CLI-style configuration
 
 ```toml
 [mcp_servers.openlca]
 command = "python"
-args   = ["-m", "src.server"]
-cwd    = "/absolute/path/to/openlca-mcp"
+args = ["-m", "src"]
+cwd = "/absolute/path/to/openlca-mcp"
 
 [mcp_servers.openlca.env]
 OPENLCA_PORT = "8080"
 ```
 
-### Remote MCP (preferred)
+## Streamable HTTP
 
-```toml
-[mcp_servers.openlca]
-url = "http://localhost:8000/mcp"
+Start the server in HTTP mode:
+
+```bash
+TRANSPORT=http MCP_HOST=0.0.0.0 MCP_PORT=8000 python -m src
 ```
 
-### SSE (legacy)
-
-```toml
-[mcp_servers.openlca]
-url = "http://localhost:8000/sse"
-```
-
----
-
-## ChatGPT Developer Mode / Apps
-
-Use the public **`/mcp`** endpoint when creating an app in ChatGPT:
+The MCP endpoint is:
 
 ```text
-https://mcp.yourdomain.com/mcp
+http://localhost:8000/mcp
 ```
 
-Legacy `/sse` works for some MCP clients, but OpenAI’s current app connection flow expects the public MCP endpoint path.
+For a remote deployment, terminate TLS in front of the server and expose only the protected `/mcp` endpoint.
 
-Two requirements people miss:
+## Remote and web-hosted MCP clients
 
-1. **Enable Developer mode** (ChatGPT → Settings → Connectors → Advanced). Without it,
-   custom connectors are limited to Deep Research and only call `search`/`fetch` — the
-   24 openLCA tools never appear as callable actions in normal chat. After adding the
-   connector, start a **new chat** and toggle it on in the composer's tools menu.
-2. **Front a buffering proxy with the no-buffering gateway.** If the server sits behind
-   a reverse proxy or tunnel that **buffers responses**, the connector will connect but
-   show **no tools** (the stream never flushes). Deploy with `docker-compose.gateway.yml`
-   and point your frontend at the gateway.
-   See [online-hosting.md](online-hosting.md#path-1--tunnel-shortcut-easiest-no-custom-server).
-
-If you set `MCP_AUTH_TOKEN` on the gateway, register the URL with the secret as a query
-param (ChatGPT's UI can't send custom headers):
+Register the HTTPS MCP endpoint supplied by your deployment, for example:
 
 ```text
-https://mcp.yourdomain.com/mcp?api_key=<MCP_AUTH_TOKEN>
+https://mcp.example.com/mcp
 ```
 
----
+The current source registers 28 tools. If a remote client connects but exposes no tool surface, verify the endpoint is using MCP streamable HTTP correctly and that any reverse proxy is not buffering the stream.
 
-## Windsurf (Codeium)
+When authentication is enabled, prefer `Authorization: Bearer <key>` in clients that support headers. The optional SDAI gateway can also accept the configured query-token form for clients that cannot set custom headers; treat such URLs as secrets because query strings may be logged.
 
-**Config file:** `~/.codeium/windsurf/mcp_config.json`
+## n8n and workflow services
 
-### stdio
+When n8n can reach the MCP server over HTTP, use the `/mcp` URL rather than spawning a separate process inside each workflow.
 
-```json
-{
-  "mcpServers": {
-    "openlca": {
-      "command": "python",
-      "args": ["-m", "src.server"],
-      "cwd": "/absolute/path/to/openlca-mcp",
-      "env": {
-        "OPENLCA_PORT": "8080"
-      }
-    }
-  }
-}
+Examples:
+
+```text
+http://openlca-mcp:8000/mcp           # same container network
+http://host.docker.internal:8000/mcp # MCP server on Docker host
+https://mcp.example.com/mcp          # protected remote endpoint
 ```
 
-### SSE
+See [n8n Integration](n8n-integration.md) for workflow design.
 
-```json
-{
-  "mcpServers": {
-    "openlca": {
-      "serverType": "sse",
-      "url": "http://localhost:8000/sse"
-    }
-  }
-}
-```
+## Connection profiles
 
----
+One server can target several openLCA instances. Configure profiles with `OPENLCA_CONNECTIONS` or `OPENLCA_CONNECTIONS_FILE`, then pass the optional `connection` argument on tool calls. Authentication can restrict callers to specific profiles.
 
-## Continue.dev (VS Code / JetBrains extension)
+## Read-only deployments
 
-**Config file:** `~/.continue/config.json`
-
-```json
-{
-  "mcpServers": [
-    {
-      "name": "openlca",
-      "command": "python",
-      "args": ["-m", "src.server"],
-      "cwd": "/absolute/path/to/openlca-mcp",
-      "env": {
-        "OPENLCA_PORT": "8080"
-      }
-    }
-  ]
-}
-```
-
-SSE variant:
-
-```json
-{
-  "mcpServers": [
-    {
-      "name": "openlca",
-      "url": "http://localhost:8000/sse"
-    }
-  ]
-}
-```
-
----
-
-## Zed
-
-**Config file:** `~/.config/zed/settings.json`
-
-```json
-{
-  "context_servers": {
-    "openlca": {
-      "command": {
-        "path": "python",
-        "args": ["-m", "src.server"],
-        "env": {
-          "OPENLCA_PORT": "8080"
-        }
-      },
-      "settings": {}
-    }
-  }
-}
-```
-
----
-
-## n8n (AI Agent / MCP Tool node)
-
-n8n typically runs in Docker. Prefer `/mcp` if your MCP node supports streamable HTTP; otherwise use the legacy SSE URL.
-
-**If n8n and the MCP server are in the same Docker Compose stack:**
-```
-http://mcp-server:8000/mcp
-```
-
-**If n8n runs in its own Docker network and the MCP server is on the host:**
-```
-http://host.docker.internal:8000/mcp
-```
-
-**Remote (production):**
-```
-https://mcp.yourdomain.com/mcp
-```
-
----
+Use `OPENLCA_READ_ONLY=true` for documentation demos, inspection workflows, and other contexts that should not modify the openLCA database. Search and calculation tools remain available; create/write operations return `WRITE_BLOCKED`.
 
 ## Troubleshooting
 
-| Symptom | Likely cause | Fix |
-|---------|-------------|-----|
-| "command not found: python" | Wrong Python name | Use `python3`, or full path: `/usr/bin/python3` |
-| Server starts but no tools | Wrong `cwd` | Use absolute path; test with `cd /path && python -m src.server` |
-| "Connection refused" on MCP URL | Server not running | Run `docker compose up` or `TRANSPORT=http python -m src.server` |
-| "Could not connect to openLCA" | IPC server down | Open openLCA → Tools → Developer Tools → IPC Server → Start |
-| Port conflict on 8000 | Another process on 8000 | Set `MCP_PORT=8001` in `.env` and update the URL in config |
-| Windows: path with backslashes | JSON escape issue | Use forward slashes (`C:/Users/you/...`) or double backslashes |
-| Remote connector **connects but shows no tools** (ChatGPT/Claude) | A buffering reverse proxy/tunnel swallows the MCP stream; `curl` of `/mcp/` still works because single responses aren't buffered | Front the server with the no-buffering gateway: `docker compose -f docker-compose.gateway.yml up -d` and point your frontend at it. Verify: `curl -D- --max-time 6 -H "Accept: text/event-stream" https://host/mcp/` must return `200 + text/event-stream` immediately, not `HTTP 000`. See [online-hosting.md](online-hosting.md#path-1--tunnel-shortcut-easiest-no-custom-server) |
-| Remote connector tools missing in ChatGPT specifically | Developer mode off, or connector not enabled in this chat | Settings → Connectors → Advanced → enable Developer mode; start a new chat and toggle the connector on in the composer |
+| Symptom | Check |
+|---|---|
+| Local server starts but client shows no tools | `cwd`, Python environment, and `python -m src` |
+| MCP endpoint cannot be reached | HTTP transport, port binding, firewall/reverse proxy |
+| MCP works but openLCA calls fail | openLCA Desktop, active database, IPC server, host/port |
+| Remote client connects but no tools appear | proxy buffering/streaming behavior and correct `/mcp` URL |
+| Write calls fail with `WRITE_BLOCKED` | connection profile or `OPENLCA_READ_ONLY` setting |
+| Wrong database is queried | confirm which database is open in the target openLCA instance |
+
+## Security boundary
+
+Do not expose an unauthenticated write-enabled MCP endpoint to the public internet. Network authentication, connection-profile authorization, read-only defaults, and database backups are operational controls; they do not replace LCA model review.

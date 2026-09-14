@@ -13,7 +13,7 @@ This MCP server enables AI agents (like those in n8n workflows) to interact with
 
 ## Features
 
-- ✅ **24 specialized LCA tools** for AI agents, covering the full openlca-ipc v0.4 surface
+- ✅ **28 typed tools** for AI agents, covering connection/health, the full openlca-ipc v0.4 workflow surface, and result lifecycle operations
 - ✅ **Built on [FastMCP](https://gofastmcp.com)** — stdio + streamable-HTTP, typed tool schemas
 - ✅ **Guided prompts + resources** — LCA walkthroughs and pullable data
   (`openlca://connections`, `openlca://impact-methods`, `openlca://product-systems`)
@@ -51,8 +51,9 @@ Before running the MCP server:
 ### 1. Install Dependencies
 
 ```bash
-cd mcp-server
-pip install -r requirements.txt
+git clone https://github.com/SDAI-institute/openlca-mcp.git
+cd openlca-mcp
+pip install -e .
 ```
 
 This will install:
@@ -121,8 +122,7 @@ When auth is on, send `Authorization: Bearer <key>` (the streaming gateway also 
 
 ## Available Tools
 
-All 24 tools are advertised only if they have a working handler (enforced at startup and by
-a regression test), so there are no "dead" tools.
+The current FastMCP application registers 28 tools. Tool registration and implementation coverage are exercised by the repository test suite so the public surface does not intentionally advertise unimplemented operations.
 
 ### Connection & health
 
@@ -137,6 +137,9 @@ a regression test), so there are no "dead" tools.
 |------|---------|--------|
 | `search_flows` | Find material flows | keywords, max_results?, flow_type? |
 | `search_processes` | Find processes | keywords, max_results? |
+| `search_product_systems` | Browse/search existing product systems | keywords?, max_results? |
+| `inspect_product_system` | Inspect the exact calculation target and functional basis | system_id or system_name |
+| `list_impact_methods` | Browse LCIA methods without guessing a name | max_results? |
 | `search_impact_methods` | Find LCIA methods (+ categories) | keywords |
 | `find_providers` | Find production processes for a flow | flow_id or flow_name |
 | `get_entity_by_name` | Exact-name lookup → EntitySummary | model_type, name |

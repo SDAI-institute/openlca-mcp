@@ -2,4 +2,4 @@ mcp>=1.28.0
 fastmcp>=3.4.0
 pydantic>=2.0.0
 python-dotenv>=1.0.0
-openlca-ipc>=0.4.0
+openlca-ipc @ https://github.com/SDAI-institute/openlca-ipc/archive/2c19661ddd9c2b2cdd96cd510c8467f84b130d8d.zip

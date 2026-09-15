@@ -87,11 +87,16 @@ async def create_process(
 @write_tool(
     "create_product_system",
     "Create a product system from a process (auto-links providers). Returns the product "
-    "system id for calculations. Provide process_id (preferred) or process_name. Optional "
-    "cutoff (0-1, e.g. 0.05 for a 5% cut-off), default_providers ('prefer'|'only'|"
-    "'ignore') and preferred_type ('LCI_RESULT'|'UNIT_PROCESS'). WRITE: blocked on "
-    "read-only connections.",
-    {"product_system": {"type": "object", "description": "The created product system."}},
+    "system id for calculations and explicitly reports any unlinked product-input exchanges "
+    "that would truncate upstream burdens. Provide process_id (preferred) or process_name. "
+    "Optional cutoff (0-1, e.g. 0.05 for a 5% cut-off), default_providers "
+    "('prefer'|'only'|'ignore') and preferred_type ('LCI_RESULT'|'UNIT_PROCESS'). "
+    "WRITE: blocked on read-only connections.",
+    {
+        "product_system": {"type": "object", "description": "The created product system."},
+        "unlinked_exchanges": arr({"type": "object", "description": "Unlinked product input exchange."}),
+        "warnings": arr({"type": "string", "description": "Scientific boundary warnings."}),
+    },
 )
 async def create_product_system(
     process_id: Optional[str] = None,

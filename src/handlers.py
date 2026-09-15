@@ -69,7 +69,22 @@ def _resolve_method(client, arguments: dict):
 def _resolve_system_ref(client, arguments: dict) -> o.Ref:
     """Resolve a product-system Ref from system_id or system_name, or raise."""
     if arguments.get("system_id"):
-        return o.Ref(id=arguments["system_id"])
+        system_id = arguments["system_id"]
+        try:
+            descriptor = client.client.get_descriptor(o.ProductSystem, uid=system_id)
+        except Exception:
+            descriptor = None
+        if descriptor is not None:
+            return descriptor
+        system = client.client.get(o.ProductSystem, system_id)
+        if system is not None:
+            return o.Ref(
+                id=system.id,
+                name=system.name,
+                category=getattr(system, "category", None),
+                ref_type=o.RefType.ProductSystem,
+            )
+        raise SystemNotFound(message=f"No product system with id '{system_id}'.")
     name = arguments.get("system_name")
     if name:
         ref = client.search.get_by_name(o.ProductSystem, name)
@@ -81,6 +96,55 @@ def _resolve_system_ref(client, arguments: dict) -> o.Ref:
                 return desc
         raise SystemNotFound(message=f"No product system named '{name}'.")
     raise SystemNotFound(message="Provide either system_id or system_name.")
+
+
+def _product_system_metadata(client, system_ref: o.Ref, amount: float | None = None) -> dict:
+    """Read exact calculation target metadata from an existing product system."""
+    system = client.client.get(o.ProductSystem, system_ref.id)
+    if system is None:
+        raise SystemNotFound(message=f"No product system with id '{system_ref.id}'.")
+
+    reference_process = getattr(system, "ref_process", None)
+    reference_flow = None
+    reference_exchange = None
+    exchange_ref = getattr(system, "ref_exchange", None)
+    if reference_process is not None and exchange_ref is not None:
+        process = client.client.get(o.Process, reference_process.id)
+        if process is not None:
+            internal_id = getattr(exchange_ref, "internal_id", None)
+            reference_exchange = next(
+                (
+                    exchange
+                    for exchange in (getattr(process, "exchanges", None) or [])
+                    if getattr(exchange, "internal_id", None) == internal_id
+                ),
+                None,
+            )
+            if reference_exchange is not None:
+                reference_flow = getattr(reference_exchange, "flow", None)
+
+    target_unit = getattr(system, "target_unit", None)
+    target_property = getattr(system, "target_flow_property", None)
+    functional_unit = {
+        "amount": amount if amount is not None else getattr(system, "target_amount", None),
+        "unit": getattr(target_unit, "name", None),
+        "unit_id": getattr(target_unit, "id", None),
+        "flow_property": getattr(target_property, "name", None),
+        "flow_property_id": getattr(target_property, "id", None),
+        "reference_flow": getattr(reference_flow, "name", None),
+        "reference_flow_id": getattr(reference_flow, "id", None),
+        "system_target_amount": getattr(system, "target_amount", None),
+    }
+    return {
+        "product_system": {
+            "id": system.id,
+            "name": system.name,
+            "category": getattr(system, "category", None),
+        },
+        "reference_process": responses.ref_to_dict(reference_process),
+        "reference_flow": responses.ref_to_dict(reference_flow),
+        "functional_unit": functional_unit,
+    }
 
 
 def _impact_to_dict(impact: Dict[str, Any]) -> Dict[str, Any]:
@@ -180,6 +244,40 @@ async def handle_search_processes(arguments: dict) -> List[TextContent]:
         return responses.error(exc)
 
 
+async def handle_search_product_systems(arguments: dict) -> List[TextContent]:
+    try:
+        client = get_client()
+        systems = client.search.find_product_systems(
+            arguments.get("keywords", []), arguments.get("max_results", 25)
+        )
+        results = [responses.ref_to_dict(system) for system in systems]
+        return responses.success({"count": len(results), "product_systems": results})
+    except Exception as exc:
+        logger.error("search_product_systems failed: %s", exc, exc_info=True)
+        return responses.error(exc)
+
+
+async def handle_inspect_product_system(arguments: dict) -> List[TextContent]:
+    try:
+        client = get_client()
+        system_ref = _resolve_system_ref(client, arguments)
+        return responses.success({"product_system": _product_system_metadata(client, system_ref)})
+    except Exception as exc:
+        logger.error("inspect_product_system failed: %s", exc, exc_info=True)
+        return responses.error(exc)
+
+
+async def handle_list_impact_methods(arguments: dict) -> List[TextContent]:
+    try:
+        client = get_client()
+        methods = client.search.find_impact_methods([], arguments.get("max_results", 25))
+        results = [responses.ref_to_dict(method) for method in methods]
+        return responses.success({"count": len(results), "impact_methods": results})
+    except Exception as exc:
+        logger.error("list_impact_methods failed: %s", exc, exc_info=True)
+        return responses.error(exc)
+
+
 async def handle_search_impact_methods(arguments: dict) -> List[TextContent]:
     try:
         client = get_client()
@@ -275,7 +373,20 @@ async def handle_create_process(arguments: dict) -> List[TextContent]:
             flow_ref = _resolve_flow_ref(client, ex_data["flow_id"])
             provider = None
             if ex_data.get("provider_id"):
-                provider = o.Ref(id=ex_data["provider_id"])
+                provider_id = ex_data["provider_id"]
+                try:
+                    provider_obj = client.client.get(o.Process, provider_id)
+                except Exception:
+                    provider_obj = None
+                if provider_obj is None:
+                    raise EntityNotFound(
+                        message=f"Provider process not found: '{provider_id}'."
+                    )
+                provider = o.Ref(
+                    id=provider_obj.id,
+                    name=provider_obj.name,
+                    ref_type=o.RefType.Process,
+                )
             unit_ref = (
                 o.Ref(id=ex_data["unit_id"]) if ex_data.get("unit_id") else None
             )
@@ -332,6 +443,61 @@ def _resolve_flow_ref(client, flow_id: str) -> o.Ref:
     return o.Ref(id=flow_id)
 
 
+def _unlinked_product_inputs(client, system_ref: o.Ref) -> list[dict]:
+    """Return product-input exchanges not represented by a product-system link.
+
+    openLCA can build and calculate a product system even when a foreground
+    product input has no provider.  That is valid engine behaviour, but an
+    automation interface must surface the truncated boundary explicitly so a
+    successful solver call is not mistaken for a complete LCA.
+    """
+    system = client.client.get(o.ProductSystem, system_ref.id)
+    if system is None:
+        return []
+
+    linked = set()
+    for link in (getattr(system, "process_links", None) or []):
+        process_id = getattr(getattr(link, "process", None), "id", None)
+        internal_id = getattr(getattr(link, "exchange", None), "internal_id", None)
+        if process_id is not None and internal_id is not None:
+            linked.add((process_id, internal_id))
+
+    process_refs = list(getattr(system, "processes", None) or [])
+    root = getattr(system, "ref_process", None)
+    if root is not None and all(getattr(ref, "id", None) != root.id for ref in process_refs):
+        process_refs.append(root)
+
+    unlinked: list[dict] = []
+    for process_ref in process_refs:
+        process = client.client.get(o.Process, process_ref.id)
+        if process is None:
+            continue
+        for exchange in (getattr(process, "exchanges", None) or []):
+            if not getattr(exchange, "is_input", False):
+                continue
+            flow_ref = getattr(exchange, "flow", None)
+            if flow_ref is None or not getattr(flow_ref, "id", None):
+                continue
+            flow = client.client.get(o.Flow, flow_ref.id)
+            if flow is None or getattr(flow, "flow_type", None) != o.FlowType.PRODUCT_FLOW:
+                continue
+            key = (process.id, getattr(exchange, "internal_id", None))
+            if key in linked:
+                continue
+            provider = getattr(exchange, "default_provider", None)
+            unlinked.append(
+                {
+                    "process_id": process.id,
+                    "process_name": process.name,
+                    "exchange_internal_id": getattr(exchange, "internal_id", None),
+                    "flow_id": flow.id,
+                    "flow_name": flow.name,
+                    "default_provider_id": getattr(provider, "id", None),
+                }
+            )
+    return unlinked
+
+
 async def handle_create_product_system(arguments: dict) -> List[TextContent]:
     try:
         _require_writable("create_product_system")
@@ -360,8 +526,19 @@ async def handle_create_product_system(arguments: dict) -> List[TextContent]:
             raise CalculationFailed(
                 message="Could not create product system (see server logs)."
             )
+        unlinked = _unlinked_product_inputs(client, system)
+        warnings = []
+        if unlinked:
+            warnings.append(
+                f"Product system contains {len(unlinked)} unlinked product input exchange(s); "
+                "calculation may omit upstream burdens."
+            )
         return responses.success(
-            {"product_system": {"id": system.id, "name": system.name}}
+            {
+                "product_system": {"id": system.id, "name": system.name},
+                "unlinked_exchanges": unlinked,
+                "warnings": warnings,
+            }
         )
     except Exception as exc:
         logger.error("create_product_system failed: %s", exc, exc_info=True)
@@ -378,6 +555,7 @@ async def handle_calculate_impacts(arguments: dict) -> List[TextContent]:
         system_ref = _resolve_system_ref(client, arguments)
         method = _resolve_method(client, arguments)
         amount = arguments.get("amount", 1.0)
+        system_metadata = _product_system_metadata(client, system_ref, amount)
 
         result = client.calculate.simple_calculation(system_ref, method, amount)
         impacts = client.results.get_total_impacts(result)
@@ -385,9 +563,11 @@ async def handle_calculate_impacts(arguments: dict) -> List[TextContent]:
 
         context = CalculationContext.capture(
             server_port=getattr(client, "port", None),
-            product_system=system_ref,
+            product_system=system_metadata["product_system"],
+            reference_process=system_metadata["reference_process"],
+            reference_flow=system_metadata["reference_flow"],
             impact_method=method,
-            functional_unit={"amount": amount},
+            functional_unit=system_metadata["functional_unit"],
         )
         stored = store.add(
             result,
@@ -399,9 +579,9 @@ async def handle_calculate_impacts(arguments: dict) -> List[TextContent]:
         summary = ResultSummary.from_impacts(
             impacts,
             result_id=stored.result_id,
-            product_system=system_ref,
+            product_system=system_metadata["product_system"],
             impact_method=method,
-            functional_unit={"amount": amount},
+            functional_unit=system_metadata["functional_unit"],
             warnings=warnings,
         )
         return responses.success(
@@ -712,6 +892,9 @@ TOOL_HANDLERS = {
     "health_check": handle_health_check,
     "search_flows": handle_search_flows,
     "search_processes": handle_search_processes,
+    "search_product_systems": handle_search_product_systems,
+    "inspect_product_system": handle_inspect_product_system,
+    "list_impact_methods": handle_list_impact_methods,
     "search_impact_methods": handle_search_impact_methods,
     "find_providers": handle_find_providers,
     "get_entity_by_name": handle_get_entity_by_name,

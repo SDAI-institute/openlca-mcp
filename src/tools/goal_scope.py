@@ -53,6 +53,61 @@ async def search_processes(
 
 
 @ro_tool(
+    "search_product_systems",
+    "Browse or search existing product systems in the active openLCA database. "
+    "This is read-only and never creates a system. Pass keywords for partial "
+    "case-insensitive matching, or omit them to browse existing calculation-ready systems.",
+    {"count": {"type": "integer"}, "product_systems": arr(REF)},
+)
+async def search_product_systems(
+    keywords: Optional[list[str]] = None,
+    max_results: int = 25,
+    connection: Optional[str] = None,
+) -> dict:
+    return await call_handler(
+        handlers.handle_search_product_systems,
+        {"keywords": keywords or [], "max_results": max_results},
+        connection,
+    )
+
+
+@ro_tool(
+    "inspect_product_system",
+    "Inspect an existing product system's exact calculation target: reference process/flow, "
+    "target amount, unit, and flow property. Use this before calculation to confirm the "
+    "functional unit. This tool is read-only.",
+    {"product_system": {"type": "object", "description": "Resolved product-system calculation metadata."}},
+)
+async def inspect_product_system(
+    system_id: Optional[str] = None,
+    system_name: Optional[str] = None,
+    connection: Optional[str] = None,
+) -> dict:
+    return await call_handler(
+        handlers.handle_inspect_product_system,
+        {"system_id": system_id, "system_name": system_name},
+        connection,
+    )
+
+
+@ro_tool(
+    "list_impact_methods",
+    "Browse LCIA methods available in the active openLCA database without guessing a method name. "
+    "Returns existing method descriptors only and never mutates the database.",
+    {"count": {"type": "integer"}, "impact_methods": arr(REF)},
+)
+async def list_impact_methods(
+    max_results: int = 25,
+    connection: Optional[str] = None,
+) -> dict:
+    return await call_handler(
+        handlers.handle_list_impact_methods,
+        {"max_results": max_results},
+        connection,
+    )
+
+
+@ro_tool(
     "search_impact_methods",
     "Search for LCIA methods (TRACI, ReCiPe, CML, ILCD, EF, ...). Returns the matched "
     "method with its impact categories (id + name).",

@@ -12,7 +12,7 @@ from typing import Annotated, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 from .. import handlers
-from ..app import call_handler, write_tool
+from ..app import call_handler, submit_handler_job, write_tool
 from ..schemas import arr
 
 
@@ -107,6 +107,35 @@ async def create_product_system(
     connection: Optional[str] = None,
 ) -> dict:
     return await call_handler(
+        handlers.handle_create_product_system,
+        {
+            "process_id": process_id,
+            "process_name": process_name,
+            "cutoff": cutoff,
+            "default_providers": default_providers,
+            "preferred_type": preferred_type,
+        },
+        connection,
+    )
+
+
+@write_tool(
+    "create_product_system_async",
+    "Start product-system construction and provider auto-linking as a background job. "
+    "Use this for large databases where system creation can exceed an MCP request window.",
+    {"job_id": {"type": "string"}, "status": {"type": "string"},
+     "terminal": {"type": "boolean"}, "connection": {"type": "string"}},
+)
+async def create_product_system_async(
+    process_id: Optional[str] = None,
+    process_name: Optional[str] = None,
+    cutoff: Optional[Cutoff] = None,
+    default_providers: ProviderPolicy = "prefer",
+    preferred_type: PreferredProcessType = "LCI_RESULT",
+    connection: Optional[str] = None,
+) -> dict:
+    return submit_handler_job(
+        "create_product_system",
         handlers.handle_create_product_system,
         {
             "process_id": process_id,

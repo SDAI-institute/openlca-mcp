@@ -1,6 +1,6 @@
 [project]
 name = "openlca-mcp"
-version = "0.4.1"
+version = "0.5.0"
 description = "MCP server for automating Life Cycle Assessment with openLCA"
 authors = [{name = "Ernest Boakye Danquah", email = "dernestbanksch@gmail.com"}]
 readme = "README.md"
@@ -8,8 +8,8 @@ requires-python = ">=3.11"
 license = "MIT"
 
 dependencies = [
-    "mcp>=1.28.0",
-    "fastmcp>=3.4.0",
+    "mcp==2.2.0",
+    "fastmcp==4.0.3",
     "openlca-ipc @ https://github.com/SDAI-institute/openlca-ipc/archive/2c19661ddd9c2b2cdd96cd510c8467f84b130d8d.zip",
     "pydantic>=2.0.0",
     "python-dotenv>=1.0.0",

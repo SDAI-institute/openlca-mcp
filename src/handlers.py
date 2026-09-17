@@ -29,7 +29,7 @@ from openlca_ipc.agent.errors import (
 )
 
 from . import responses
-from .lca_client import get_client, read_only_enabled
+from .lca_client import get_active_profile_id, get_client, read_only_enabled
 from .result_store import store
 
 logger = logging.getLogger(__name__)
@@ -164,8 +164,8 @@ def _impacts_payload(impacts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def _stored_or_raise(result_id: str):
-    """Fetch a StoredResult or raise EntityNotFound."""
-    stored = store.get(result_id)
+    """Fetch a StoredResult for the active connection or raise EntityNotFound."""
+    stored = store.get(result_id, connection_id=get_active_profile_id())
     if stored is None:
         raise EntityNotFound(
             message=f"Unknown result_id '{result_id}'. Call calculate_impacts first."
@@ -864,7 +864,7 @@ async def handle_export_results(arguments: dict) -> List[TextContent]:
 async def handle_dispose_result(arguments: dict) -> List[TextContent]:
     try:
         result_id = arguments["result_id"]
-        if store.dispose(result_id):
+        if store.dispose(result_id, connection_id=get_active_profile_id()):
             return responses.success(
                 {"disposed": result_id, "message": "Result disposed."}
             )
@@ -876,7 +876,7 @@ async def handle_dispose_result(arguments: dict) -> List[TextContent]:
 
 async def handle_dispose_all_results(arguments: dict) -> List[TextContent]:
     try:
-        count = store.dispose_all()
+        count = store.dispose_all(connection_id=get_active_profile_id())
         return responses.success({"disposed_count": count})
     except Exception as exc:
         logger.error("dispose_all_results failed: %s", exc, exc_info=True)

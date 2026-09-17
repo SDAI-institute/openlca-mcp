@@ -8,4 +8,4 @@ wrappers that delegate to the proven handlers in ``src/handlers.py`` via the
 offload), so the openLCA logic and its tests are reused unchanged.
 """
 
-from . import goal_scope, interpretation, inventory, lca_impact, lifecycle  # noqa: F401
+from . import goal_scope, interpretation, inventory, jobs, lca_impact, lifecycle  # noqa: F401

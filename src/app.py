@@ -30,6 +30,7 @@ from fastmcp.server.auth import AccessToken, TokenVerifier
 from fastmcp.server.dependencies import get_access_token
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from mcp.types import ToolAnnotations
+from starlette.middleware import Middleware as StarletteMiddleware
 
 from openlca_ipc import health_check as _health_check
 
@@ -39,6 +40,7 @@ from .auth import (
 )
 from .connections import ConnectionProfile, get_profiles
 from .lca_client import get_client
+from .job_runtime import connection_lock, jobs
 from .schemas import out
 
 logger = logging.getLogger(__name__)
@@ -52,6 +54,8 @@ _SERVER_NAME = "openlca-lca-server"
 _SERVER_INSTRUCTIONS = (
     "Use these tools for openLCA life-cycle assessment workflows. "
     "Start with test_connection or health_check before calculations. "
+    "Prefer *_async tools for Monte Carlo, scenarios, comparisons, or other potentially "
+    "long calculations; poll get_job_status and retrieve with get_job_result. "
     "Call dispose_result when finished with a result_id. "
     "Create and export tools mutate the environment; honor the server's read-only mode. "
     "Pass an optional `connection` to target a specific openLCA instance."
@@ -132,6 +136,39 @@ def _drive(coro) -> Any:
     raise RuntimeError("handler unexpectedly awaited inside the worker thread")
 
 
+def _locked_call(connection_id: str, fn: Callable[[], Any]) -> Any:
+    """Run a synchronous IPC operation under its connection-profile lock."""
+    with connection_lock(connection_id):
+        return fn()
+
+
+def _execute_handler_sync(
+    handler: Callable[[dict], Awaitable[list]],
+    arguments: dict,
+    profile: ConnectionProfile,
+    *,
+    acquire_lock: bool = True,
+) -> dict[str, Any]:
+    """Drive one handler under its captured connection profile.
+
+    Foreground calls acquire the profile lock here. Background jobs already hold
+    the same lock in ``JobManager`` and pass ``acquire_lock=False``.
+    """
+    def _invoke() -> dict[str, Any]:
+        token = lca_client.set_active_profile(profile.id)
+        try:
+            contents = _drive(handler(dict(arguments)))
+        finally:
+            lca_client.reset_active_profile(token)
+        body = responses.parse_json_content(contents)
+        return body if body is not None else {"success": True}
+
+    if acquire_lock:
+        with connection_lock(profile.id):
+            return _invoke()
+    return _invoke()
+
+
 async def call_handler(
     handler: Callable[[dict], Awaitable[list]],
     arguments: dict,
@@ -143,16 +180,35 @@ async def call_handler(
     except AuthError as exc:
         return responses.error_body(exc, error_code=exc.error_code)
 
-    def _work() -> list:
-        token = lca_client.set_active_profile(profile.id)
-        try:
-            return _drive(handler(dict(arguments)))
-        finally:
-            lca_client.reset_active_profile(token)
+    return await anyio.to_thread.run_sync(
+        lambda: _execute_handler_sync(handler, arguments, profile)
+    )
 
-    contents = await anyio.to_thread.run_sync(_work)
-    body = responses.parse_json_content(contents)
-    return body if body is not None else {"success": True}
+
+def submit_handler_job(
+    tool_name: str,
+    handler: Callable[[dict], Awaitable[list]],
+    arguments: dict,
+    connection: Optional[str],
+) -> dict[str, Any]:
+    """Authorize and enqueue a long handler while preserving profile + tenant affinity."""
+    identity = current_identity()
+    try:
+        profile = resolve_profile(identity, connection)
+    except AuthError as exc:
+        return responses.error_body(exc, error_code=exc.error_code)
+
+    return jobs.submit(
+        tool_name,
+        profile.id,
+        identity.tenant_id,
+        lambda: _execute_handler_sync(handler, arguments, profile, acquire_lock=False),
+    )
+
+
+def current_job_owner() -> str:
+    """Tenant id used to scope compatibility job handles."""
+    return current_identity().tenant_id
 
 
 async def run_offloaded(
@@ -257,13 +313,15 @@ async def health(_request):
 )
 async def test_connection(connection: Optional[str] = None) -> dict[str, Any]:
     try:
-        client = resolve_client(connection)
+        client, profile = _resolve(connection)
     except AuthError as exc:
         return responses.error_body(exc, error_code=exc.error_code)
     try:
-        connected = await anyio.to_thread.run_sync(client.test_connection)
+        connected = await anyio.to_thread.run_sync(
+            lambda: _locked_call(profile.id, client.test_connection)
+        )
         return responses.success_body(
-            {"connected": connected, "port": client.port, "connection": connection or "default"}
+            {"connected": connected, "port": client.port, "connection": profile.id}
         )
     except Exception as exc:
         logger.error("test_connection failed: %s", exc, exc_info=True)
@@ -278,14 +336,16 @@ async def test_connection(connection: Optional[str] = None) -> dict[str, Any]:
 )
 async def health_check(count_entities: bool = True, connection: Optional[str] = None) -> dict[str, Any]:
     try:
-        client = resolve_client(connection)
+        client, profile = _resolve(connection)
     except AuthError as exc:
         return responses.error_body(exc, error_code=exc.error_code)
     try:
         # _health_check(client, *, count_entities=...) — count_entities is keyword-only,
         # so wrap in a lambda (anyio.to_thread.run_sync only forwards positional args).
         report = await anyio.to_thread.run_sync(
-            lambda: _health_check(client, count_entities=count_entities)
+            lambda: _locked_call(
+                profile.id, lambda: _health_check(client, count_entities=count_entities)
+            )
         )
         return responses.success_body({"health": report})
     except Exception as exc:
@@ -300,6 +360,26 @@ from . import resources as _resources  # noqa: E402,F401
 from . import tools as _tools  # noqa: E402,F401
 
 
+class _NormalizeMcpPathMiddleware:
+    """Accept both the configured MCP path and its trailing-slash variant.
+
+    Some remote MCP clients preserve a trailing slash in the configured server URL.
+    Starlette otherwise answers POST /mcp/ with a 307 redirect to /mcp, which some
+    connector transports do not replay. Rewrite only this exact alias internally.
+    """
+
+    def __init__(self, app, canonical_path: str) -> None:
+        self.app = app
+        self.canonical_path = canonical_path.rstrip("/") or "/"
+        self.alias_path = self.canonical_path if self.canonical_path == "/" else self.canonical_path + "/"
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope.get("type") == "http" and scope.get("path") == self.alias_path:
+            scope = dict(scope)
+            scope["path"] = self.canonical_path
+            scope["raw_path"] = self.canonical_path.encode("utf-8")
+        await self.app(scope, receive, send)
+
 def run() -> None:
     """Run the server with the configured transport."""
     transport = os.getenv("TRANSPORT", "stdio").strip().lower()
@@ -310,13 +390,15 @@ def run() -> None:
     if transport == "stdio":
         mcp.run()
     else:
+        http_path = os.getenv("MCP_HTTP_PATH", "/mcp")
         mcp.run(
             transport="http",
             host=os.getenv("MCP_HOST", "0.0.0.0"),
             port=int(os.getenv("MCP_PORT", "8000")),
-            path=os.getenv("MCP_HTTP_PATH", "/mcp"),
+            path=http_path,
             stateless_http=True,
             json_response=True,
+            middleware=[StarletteMiddleware(_NormalizeMcpPathMiddleware, canonical_path=http_path)],
         )
 
 

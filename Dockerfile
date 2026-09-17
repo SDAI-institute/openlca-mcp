@@ -1,11 +1,10 @@
 FROM python:3.12-slim
 
-# Injected by CI: docker build --build-arg VERSION=0.3.0 .
-# Falls back to "dev" for local builds so the image is always labelled.
-ARG VERSION=dev
+# Injected by CI when publishing; local builds default to the package release.
+ARG VERSION=0.5.0
 
 LABEL org.opencontainers.image.title="openlca-mcp" \
-      org.opencontainers.image.description="MCP server for Life Cycle Assessment with openLCA — 24 tools for calculations, contributions, inventory, Sankey, and more." \
+      org.opencontainers.image.description="MCP server for Life Cycle Assessment with openLCA — calculations, contributions, inventory, uncertainty, background jobs, and more." \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.source="https://github.com/SDAI-institute/openlca-mcp" \
       org.opencontainers.image.licenses="MIT" \

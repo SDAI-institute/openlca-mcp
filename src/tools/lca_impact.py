@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Literal, Optional
 
 from .. import handlers
-from ..app import call_handler, ro_tool
+from ..app import call_handler, ro_tool, submit_handler_job
 from ..schemas import IMPACT, REF, arr
 
 
@@ -32,6 +32,36 @@ async def calculate_impacts(
     connection: Optional[str] = None,
 ) -> dict:
     return await call_handler(
+        handlers.handle_calculate_impacts,
+        {
+            "system_id": system_id,
+            "system_name": system_name,
+            "method_id": method_id,
+            "method_keywords": method_keywords,
+            "amount": amount,
+        },
+        connection,
+    )
+
+
+@ro_tool(
+    "calculate_impacts_async",
+    "Start an impact calculation as a background job and return immediately. Use "
+    "get_job_status(job_id) until terminal=true, then get_job_result(job_id). The "
+    "completed result contains the same result_id/summary/impacts payload as calculate_impacts.",
+    {"job_id": {"type": "string"}, "status": {"type": "string"},
+     "terminal": {"type": "boolean"}, "connection": {"type": "string"}},
+)
+async def calculate_impacts_async(
+    system_id: Optional[str] = None,
+    system_name: Optional[str] = None,
+    method_id: Optional[str] = None,
+    method_keywords: Optional[list[str]] = None,
+    amount: float = 1.0,
+    connection: Optional[str] = None,
+) -> dict:
+    return submit_handler_job(
+        "calculate_impacts",
         handlers.handle_calculate_impacts,
         {
             "system_id": system_id,

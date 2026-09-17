@@ -48,6 +48,11 @@ def reset_active_profile(token) -> None:
     """Restore the active profile from a token returned by set_active_profile."""
     _active_profile.reset(token)
 
+
+def get_active_profile_id() -> Optional[str]:
+    """Return the profile id bound to the current handler/job context."""
+    return _active_profile.get()
+
 #: Default (connect + read) timeout, in seconds, applied to every IPC HTTP call.
 #: olca_ipc issues blocking ``requests`` calls with no timeout, so an
 #: unreachable or black-holed openLCA host would otherwise hang the caller

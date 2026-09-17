@@ -12,6 +12,7 @@ reuse ``id()`` after garbage collection) and carried no calculation context.
 
 import uuid
 import logging
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -28,6 +29,7 @@ class StoredResult:
     context: Optional[Dict[str, Any]] = None
     system_ref: Any = None
     method: Any = None
+    connection_id: Optional[str] = None
 
 
 class ResultStore:
@@ -35,6 +37,7 @@ class ResultStore:
 
     def __init__(self) -> None:
         self._results: Dict[str, StoredResult] = {}
+        self._lock = threading.RLock()
 
     def add(
         self,
@@ -44,8 +47,14 @@ class ResultStore:
         context: Optional[Dict[str, Any]] = None,
         system_ref: Any = None,
         method: Any = None,
+        connection_id: Optional[str] = None,
     ) -> StoredResult:
         """Store a result and return its StoredResult (with a fresh result_id)."""
+        if connection_id is None:
+            # Lazy import avoids coupling the store to transport setup at module load.
+            from .lca_client import get_active_profile_id
+
+            connection_id = get_active_profile_id()
         result_id = f"res_{uuid.uuid4().hex[:12]}"
         stored = StoredResult(
             result_id=result_id,
@@ -54,38 +63,54 @@ class ResultStore:
             context=context,
             system_ref=system_ref,
             method=method,
+            connection_id=connection_id,
         )
-        self._results[result_id] = stored
+        with self._lock:
+            self._results[result_id] = stored
         return stored
 
-    def get(self, result_id: str) -> Optional[StoredResult]:
-        """Return the StoredResult for an id, or None if unknown."""
-        return self._results.get(result_id)
+    def get(self, result_id: str, connection_id: Optional[str] = None) -> Optional[StoredResult]:
+        """Return a stored result, optionally enforcing connection affinity."""
+        with self._lock:
+            stored = self._results.get(result_id)
+        if stored is None:
+            return None
+        if connection_id is not None and stored.connection_id not in (None, connection_id):
+            return None
+        return stored
 
     def __contains__(self, result_id: str) -> bool:
-        return result_id in self._results
+        with self._lock:
+            return result_id in self._results
 
-    def dispose(self, result_id: str) -> bool:
-        """
-        Dispose one result and drop it from the registry.
-
-        Returns True if the id was known, False otherwise. Disposal errors are
-        logged but do not prevent removal from the registry.
-        """
-        stored = self._results.pop(result_id, None)
-        if stored is None:
-            return False
+    def dispose(self, result_id: str, connection_id: Optional[str] = None) -> bool:
+        """Dispose one result, optionally only when it belongs to a connection."""
+        with self._lock:
+            stored = self._results.get(result_id)
+            if stored is None:
+                return False
+            if connection_id is not None and stored.connection_id not in (None, connection_id):
+                return False
+            self._results.pop(result_id, None)
         _safe_dispose(stored)
         return True
 
-    def dispose_all(self) -> int:
-        """Dispose every stored result. Returns the count disposed."""
-        count = 0
-        for stored in list(self._results.values()):
+    def dispose_all(self, connection_id: Optional[str] = None) -> int:
+        """Dispose all tracked results, optionally scoped to one connection."""
+        with self._lock:
+            if connection_id is None:
+                selected = list(self._results.values())
+                self._results.clear()
+            else:
+                selected = [
+                    stored for stored in self._results.values()
+                    if stored.connection_id in (None, connection_id)
+                ]
+                for stored in selected:
+                    self._results.pop(stored.result_id, None)
+        for stored in selected:
             _safe_dispose(stored)
-            count += 1
-        self._results.clear()
-        return count
+        return len(selected)
 
 
 def _safe_dispose(stored: StoredResult) -> None:

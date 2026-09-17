@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Literal, Optional
 
 from .. import handlers
-from ..app import call_handler, ro_tool, write_tool
+from ..app import call_handler, ro_tool, submit_handler_job, write_tool
 from ..schemas import REF, arr
 
 
@@ -180,6 +180,34 @@ async def compare_systems(
 
 
 @ro_tool(
+    "compare_systems_async",
+    "Run a two-system comparison as a background job and return a job_id immediately.",
+    {"job_id": {"type": "string"}, "status": {"type": "string"},
+     "terminal": {"type": "boolean"}, "connection": {"type": "string"}},
+)
+async def compare_systems_async(
+    system1_id: str,
+    system2_id: str,
+    method_id: Optional[str] = None,
+    method_keywords: Optional[list[str]] = None,
+    amount: float = 1.0,
+    connection: Optional[str] = None,
+) -> dict:
+    return submit_handler_job(
+        "compare_systems",
+        handlers.handle_compare_systems,
+        {
+            "system1_id": system1_id,
+            "system2_id": system2_id,
+            "method_id": method_id,
+            "method_keywords": method_keywords,
+            "amount": amount,
+        },
+        connection,
+    )
+
+
+@ro_tool(
     "run_monte_carlo",
     "Run Monte Carlo uncertainty analysis. Returns per-impact statistics (mean, std, "
     "CV, percentiles). Can be slow for large systems / high iteration counts.",
@@ -196,6 +224,33 @@ async def run_monte_carlo(
     connection: Optional[str] = None,
 ) -> dict:
     return await call_handler(
+        handlers.handle_run_monte_carlo,
+        {
+            "system_id": system_id,
+            "method_id": method_id,
+            "method_keywords": method_keywords,
+            "iterations": iterations,
+        },
+        connection,
+    )
+
+
+@ro_tool(
+    "run_monte_carlo_async",
+    "Start Monte Carlo uncertainty analysis as a background job. Recommended for "
+    "large systems or more than a small number of iterations.",
+    {"job_id": {"type": "string"}, "status": {"type": "string"},
+     "terminal": {"type": "boolean"}, "connection": {"type": "string"}},
+)
+async def run_monte_carlo_async(
+    system_id: str,
+    method_id: Optional[str] = None,
+    method_keywords: Optional[list[str]] = None,
+    iterations: int = 100,
+    connection: Optional[str] = None,
+) -> dict:
+    return submit_handler_job(
+        "run_monte_carlo",
         handlers.handle_run_monte_carlo,
         {
             "system_id": system_id,
@@ -237,6 +292,35 @@ async def run_scenario_analysis(
     )
 
 
+@ro_tool(
+    "run_scenario_analysis_async",
+    "Run a parameter sweep as a background job. Use for many scenario values or "
+    "large product systems to avoid holding one MCP request open.",
+    {"job_id": {"type": "string"}, "status": {"type": "string"},
+     "terminal": {"type": "boolean"}, "connection": {"type": "string"}},
+)
+async def run_scenario_analysis_async(
+    system_id: str,
+    parameter_name: str,
+    values: list[float],
+    method_id: Optional[str] = None,
+    method_keywords: Optional[list[str]] = None,
+    connection: Optional[str] = None,
+) -> dict:
+    return submit_handler_job(
+        "run_scenario_analysis",
+        handlers.handle_run_scenario_analysis,
+        {
+            "system_id": system_id,
+            "parameter_name": parameter_name,
+            "values": values,
+            "method_id": method_id,
+            "method_keywords": method_keywords,
+        },
+        connection,
+    )
+
+
 @write_tool(
     "export_results",
     "Export results to a file. With result_id: export its impacts to CSV (format=csv) "
@@ -257,6 +341,34 @@ async def export_results(
     connection: Optional[str] = None,
 ) -> dict:
     return await call_handler(
+        handlers.handle_export_results,
+        {
+            "filepath": filepath,
+            "result_id": result_id,
+            "data": data,
+            "kind": kind,
+            "format": format,
+        },
+        connection,
+    )
+
+
+@write_tool(
+    "export_results_async",
+    "Export a large result/comparison in the background and return a job_id immediately.",
+    {"job_id": {"type": "string"}, "status": {"type": "string"},
+     "terminal": {"type": "boolean"}, "connection": {"type": "string"}},
+)
+async def export_results_async(
+    filepath: str,
+    result_id: Optional[str] = None,
+    data: Optional[dict[str, Any]] = None,
+    kind: Literal["impacts", "comparison"] = "impacts",
+    format: Literal["csv", "excel"] = "csv",
+    connection: Optional[str] = None,
+) -> dict:
+    return submit_handler_job(
+        "export_results",
         handlers.handle_export_results,
         {
             "filepath": filepath,

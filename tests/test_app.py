@@ -66,3 +66,22 @@ async def test_forbidden_connection_is_gated(monkeypatch, fake_client):
     body = await app.test_connection(connection="secret")
     assert body["success"] is False
     assert body["error_code"] == "FORBIDDEN_CONNECTION"
+
+async def test_mcp_path_middleware_accepts_trailing_slash():
+    seen = {}
+
+    async def inner(scope, receive, send):
+        seen["path"] = scope["path"]
+        seen["raw_path"] = scope["raw_path"]
+
+    middleware = app._NormalizeMcpPathMiddleware(inner, "/mcp")
+    scope = {"type": "http", "path": "/mcp/", "raw_path": b"/mcp/"}
+
+    async def receive():
+        return {"type": "http.disconnect"}
+
+    async def send(_message):
+        return None
+
+    await middleware(scope, receive, send)
+    assert seen == {"path": "/mcp", "raw_path": b"/mcp"}

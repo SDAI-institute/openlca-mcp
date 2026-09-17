@@ -38,3 +38,29 @@ def test_dispose_swallows_errors():
     # Should not raise, and should still drop the entry.
     assert s.dispose(stored.result_id) is True
     assert stored.result_id not in s
+
+
+def test_connection_affinity_blocks_cross_profile_access():
+    s = ResultStore()
+    result = MagicMock()
+    stored = s.add(result, connection_id="default")
+
+    assert s.get(stored.result_id, connection_id="default") is stored
+    assert s.get(stored.result_id, connection_id="remote") is None
+    assert s.dispose(stored.result_id, connection_id="remote") is False
+    result.dispose.assert_not_called()
+    assert s.dispose(stored.result_id, connection_id="default") is True
+    result.dispose.assert_called_once()
+
+
+def test_dispose_all_can_be_scoped_to_connection():
+    s = ResultStore()
+    default_result = MagicMock()
+    remote_result = MagicMock()
+    s.add(default_result, connection_id="default")
+    remote = s.add(remote_result, connection_id="remote")
+
+    assert s.dispose_all(connection_id="default") == 1
+    default_result.dispose.assert_called_once()
+    remote_result.dispose.assert_not_called()
+    assert s.get(remote.result_id, connection_id="remote") is remote

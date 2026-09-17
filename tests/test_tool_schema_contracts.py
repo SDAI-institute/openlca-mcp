@@ -29,7 +29,7 @@ def non_null_schema(schema: dict[str, Any]) -> dict[str, Any]:
 
 
 def test_package_and_runtime_versions_match() -> None:
-    assert src.__version__ == "0.5.0"
+    assert src.__version__ == "0.6.0"
 
 
 @pytest.mark.asyncio

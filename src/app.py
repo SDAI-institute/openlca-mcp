@@ -54,8 +54,9 @@ _SERVER_NAME = "openlca-lca-server"
 _SERVER_INSTRUCTIONS = (
     "Use these tools for openLCA life-cycle assessment workflows. "
     "Start with test_connection or health_check before calculations. "
-    "Prefer *_async tools for Monte Carlo, scenarios, comparisons, or other potentially "
-    "long calculations; poll get_job_status and retrieve with get_job_result. "
+    "Modern MCP 2026-07-28 clients may run calculations, product-system creation, "
+    "comparisons, Monte Carlo, scenarios, and exports as native Tasks when enabled. "
+    "Older clients can use the *_async compatibility tools and poll get_job_status / get_job_result. "
     "Call dispose_result when finished with a result_id. "
     "Create and export tools mutate the environment; honor the server's read-only mode. "
     "Pass an optional `connection` to target a specific openLCA instance."
@@ -74,6 +75,19 @@ _SERVER_ICON_DATA_URI = (
     "data:image/svg+xml;base64,"
     + base64.b64encode(_SERVER_ICON_SVG.encode("utf-8")).decode("ascii")
 )
+
+NATIVE_TASKS_ENABLED = os.getenv("OPENLCA_NATIVE_TASKS_ENABLED", "false").strip().lower() in (
+    "1", "true", "yes", "on"
+)
+NATIVE_TASKS_CONCURRENCY = max(1, int(os.getenv("OPENLCA_NATIVE_TASKS_CONCURRENCY", "2")))
+NATIVE_TASK_TOOL_NAMES = {
+    "calculate_impacts",
+    "create_product_system",
+    "compare_systems",
+    "run_monte_carlo",
+    "run_scenario_analysis",
+    "export_results",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +248,7 @@ def ro_tool(name: str, description: str, output: Optional[dict] = None):
         name=name,
         description=description,
         output_schema=out(output),
+        task=NATIVE_TASKS_ENABLED and name in NATIVE_TASK_TOOL_NAMES,
         annotations=ToolAnnotations(
             title=_title(name), readOnlyHint=True, idempotentHint=True, openWorldHint=False
         ),
@@ -246,6 +261,7 @@ def write_tool(name: str, description: str, output: Optional[dict] = None, *, id
         name=name,
         description=description,
         output_schema=out(output),
+        task=NATIVE_TASKS_ENABLED and name in NATIVE_TASK_TOOL_NAMES,
         annotations=ToolAnnotations(
             title=_title(name), readOnlyHint=False, destructiveHint=False,
             idempotentHint=idempotent, openWorldHint=False,
@@ -288,6 +304,10 @@ mcp = FastMCP(
     auth=_OpenLCATokenVerifier() if auth_enabled() else None,
 )
 mcp.add_middleware(TelemetryMiddleware())
+if NATIVE_TASKS_ENABLED:
+    from fastmcp_tasks import TasksExtension
+
+    mcp.add_extension(TasksExtension(concurrency=NATIVE_TASKS_CONCURRENCY))
 
 
 @mcp.custom_route("/health", methods=["GET"])
@@ -383,7 +403,10 @@ class _NormalizeMcpPathMiddleware:
 def run() -> None:
     """Run the server with the configured transport."""
     transport = os.getenv("TRANSPORT", "stdio").strip().lower()
-    logger.info("Starting OpenLCA FastMCP server (transport=%s)", transport)
+    logger.info(
+        "Starting OpenLCA FastMCP server (transport=%s, native_tasks=%s, task_concurrency=%s)",
+        transport, NATIVE_TASKS_ENABLED, NATIVE_TASKS_CONCURRENCY,
+    )
     logger.info("Connection profiles: %s", ", ".join(sorted(get_profiles())))
     telemetry.setup(__version__, transport)
 

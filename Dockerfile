@@ -1,7 +1,7 @@
 FROM python:3.12-slim
 
 # Injected by CI when publishing; local builds default to the package release.
-ARG VERSION=0.5.0
+ARG VERSION=0.6.0
 
 LABEL org.opencontainers.image.title="openlca-mcp" \
       org.opencontainers.image.description="MCP server for Life Cycle Assessment with openLCA — calculations, contributions, inventory, uncertainty, background jobs, and more." \

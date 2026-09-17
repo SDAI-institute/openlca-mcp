@@ -22,6 +22,16 @@ def _reset(monkeypatch):
     connections.reset_profiles()
 
 
+async def test_native_task_metadata_switch():
+    expected = "optional" if app.NATIVE_TASKS_ENABLED else "forbidden"
+    for name in (
+        "calculate_impacts", "create_product_system", "compare_systems",
+        "run_monte_carlo", "run_scenario_analysis", "export_results",
+    ):
+        tool = await app.mcp.get_tool(name)
+        assert tool.task_config.mode == expected
+
+
 @pytest.fixture
 def fake_client(monkeypatch):
     client = MagicMock(name="OLCAClient")
